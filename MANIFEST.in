@@ -1,0 +1,12 @@
+include README.md THIRD_PARTY.md LICENSE CURRENT_VERSION.json requirements-lock.txt dex-frax
+recursive-include docs *.md *.html FRAX_LICENSE
+graft assets/dex_evt
+prune examples
+prune outputs
+prune .local-data
+prune tests
+prune Dex-StanfordASL-frax
+exclude INTERNAL_DEVELOPMENT_SUMMARY.md
+exclude src/dex_frax/v8/reference/lafan1_surfaces.json
+exclude src/dex_frax/v8/reference/soma_surfaces.json
+global-exclude .DS_Store *.py[cod] ._*

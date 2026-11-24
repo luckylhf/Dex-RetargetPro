@@ -1,0 +1,63 @@
+"""Separate reliable inferred support from uncertain geometric contact hints."""
+import numpy as np
+
+POLICY=dict(name='confidence_aware_body_support_v1',confidence_min=.8,
+            tolerance_basis='existing source contact height/anchor tolerances scaled to robot metres',
+            measured_load=False)
+
+
+def same_support_step(foot, frame):
+    """A continuous contact edge with the same anchor and sole point."""
+    return (frame > 0 and foot['contact'][frame-1] > 0 and foot['contact'][frame] > 0
+            and np.array_equal(foot['anchors'][frame-1], foot['anchors'][frame])
+            and np.array_equal(foot['pivots'][frame-1], foot['pivots'][frame]))
+
+
+def preserve_contact(contact, frame):
+    """Use the final trusted-contact predicate for prepared solver constraints.
+
+    Old callers without confidence evidence keep their conservative lock.
+    Explicit uncertain hints remain in the weighted pose objective.
+    """
+    if int(contact['mode'][frame])<=0:return False
+    if 'confidence' not in contact:return True
+    return float(contact['confidence'][frame])*float(contact.get('source_geometry_confidence',0.))>=POLICY['confidence_min']
+
+
+def evaluate_contacts(meta,dg,errors,n,fps):
+    cfg=meta.get('configuration',{}).get('contact',{})
+    scale=float(meta.get('leg_scale',1.))
+    normal_limit=float(cfg.get('height_tolerance_m',.035))*scale
+    xy_limit=float(cfg.get('max_anchor_excursion_m',.035))*scale
+    bad=np.zeros(n,bool);report={}
+    for c in meta.get('body_contact_models',[]):
+        name=c['body_name'];prefix='body_'+name+'_'
+        mode=np.asarray(dg[prefix+'mode']);confidence=np.asarray(dg.get(prefix+'confidence',np.zeros(n)))
+        reliable=(mode>0)&(confidence*float(c.get('source_geometry_confidence',0.))>=POLICY['confidence_min'])
+        normal=np.array([np.nan if v is None else v/100 for v in errors[name]['normal_cm']])
+        xy=np.array([np.nan if v is None else v/100 for v in errors[name]['fixed_xy_cm']])
+        normal_bad=reliable&((~np.isfinite(normal))|(normal>normal_limit))
+        xy_bad=reliable&(mode==1)&((~np.isfinite(xy))|(xy>xy_limit))
+        bad|=normal_bad|xy_bad
+        report[name]=dict(trusted_frames=int(reliable.sum()),hint_frames=int(((mode>0)&~reliable).sum()),
+            normal_violating_frames=np.flatnonzero(normal_bad).tolist(),fixed_xy_violating_frames=np.flatnonzero(xy_bad).tolist(),
+            max_trusted_normal_m=float(np.nanmax(normal[reliable])) if reliable.any() and np.isfinite(normal[reliable]).any() else None,
+            max_trusted_fixed_xy_m=float(np.nanmax(xy[reliable&(mode==1)])) if np.isfinite(xy[reliable&(mode==1)]).any() else None)
+    return dict(policy=POLICY,normal_tolerance_m=normal_limit,fixed_xy_tolerance_m=xy_limit,
+                violating_frames=np.flatnonzero(bad).tolist(),contacts=report,
+                scope='inferred high-confidence contact geometry, not measured forces; sliding/rolling do not lock XY')
+
+
+def support_deficit(report, errors, start, end):
+    """Sum trusted support excess in metres over the evaluated frame range."""
+    total = 0.
+    for name, contact in report['contacts'].items():
+        for frames, metric, tolerance in (
+                ('normal_violating_frames','normal_cm','normal_tolerance_m'),
+                ('fixed_xy_violating_frames','fixed_xy_cm','fixed_xy_tolerance_m')):
+            indices = [i for i in contact[frames] if start <= i < end]
+            if indices:
+                values = np.asarray(errors[name][metric],dtype=float)[indices]
+                limit = report[tolerance]
+                total += np.maximum(0., np.nan_to_num(values / 100., nan=2.*limit) - limit).sum()
+    return float(total)

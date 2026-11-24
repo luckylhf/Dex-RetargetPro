@@ -1,0 +1,495 @@
+"""CLI and independently identified, quality-gated motion outputs."""
+import argparse
+import hashlib
+import importlib.metadata
+import json
+import math
+import os
+from pathlib import Path
+import time
+
+from .contract import (DEFAULT_FOOT_CONTACT, DEFAULT_REFINE_FLOW, REFINE_FLOWS,
+                       UNLIMITED_REPAIR_BUDGET, uses_original_frax)
+
+
+def _repair_budget_arg(value):
+    if value == UNLIMITED_REPAIR_BUDGET:
+        return value
+    error = argparse.ArgumentTypeError('expected positive finite seconds or unlimited')
+    try:
+        seconds = float(value)
+    except ValueError:
+        raise error from None
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise error
+    return seconds
+
+
+def sha(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _json_scalar(value):
+    import numpy as np
+
+    if isinstance(value, (np.bool_, np.integer, np.floating)):
+        return value.item()
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
+def atomic_json(path, value):
+    path = Path(path)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(value, ensure_ascii=False, indent=2, default=_json_scalar))
+    os.replace(tmp, path)
+
+
+_FROZEN_IDENTITY=None
+
+def static_identity():
+    from .paths import asset_fingerprints
+    from .source_geometry import REFERENCE, SURFACES, surface_path
+    from . import __version__
+    root = Path(__file__).parent
+    files = {str(p.relative_to(root)): sha(p) for p in sorted(root.rglob("*")) if p.is_file() and p.suffix in (".py", ".json", ".bvh")}
+    for source, filename in SURFACES.items():
+        key = (REFERENCE / filename).relative_to(root).as_posix()
+        path = surface_path(source)
+        files.pop(key, None)
+        if path.is_file():
+            files[key] = sha(path)
+    model = asset_fingerprints()
+    import frax
+    frax_root = Path(frax.__file__).parent
+    frax_hashes = {str(p.relative_to(frax_root)): sha(p) for p in sorted(frax_root.rglob("*.py"))}
+    return dict(converter="dex_frax", version=__version__, implementation=files,
+                frax_implementation=frax_hashes, assets=model,
+                runtime={k: importlib.metadata.version(k) for k in ("frax", "jax", "jaxlib", "elastiqp", "numpy", "scipy", "mujoco", "mink", "osqp", "qpsolvers")})
+
+
+def identity(args):
+    import copy
+    info=copy.deepcopy(_FROZEN_IDENTITY) if _FROZEN_IDENTITY is not None else static_identity()
+    info.update(mode=args.mode,source=args.source,fps=50.,iterations=args.iterations,
+                initial_iterations=args.initial_iterations,max_frames=args.max_frames,
+                input_sha256=sha(args.input),legacy_frax=uses_original_frax(args),
+                ik_block_frames=int(os.environ.get('DEX_FRAX_IK_BLOCK_FRAMES','128')))
+    from .contract import conversion_contract
+    info['conversion_contract']=conversion_contract(args)
+    info['ik_block_frames']=info['conversion_contract']['ik_block_frames']
+    if getattr(args, "v8_seed", None) is not None:
+        info["v8_seed_sha256"] = sha(args.v8_seed)
+    if args.source == 'smplx':
+        from .smplx_cli import preparation_identity
+        info['smplx_input'] = preparation_identity(args)
+    info["fingerprint"] = hashlib.sha256(json.dumps(info, sort_keys=True).encode()).hexdigest()
+    return info
+
+
+def export_training(*args):
+    from .acceptance import export_training as export
+    return export(*args)
+
+
+def convert(args):
+    if args.mode not in ('frax','v8'):
+        raise ValueError('Conversion mode must be frax or v8; hybrid has been removed')
+    if getattr(args,'reuse_initial_from',None) is not None or getattr(args,'require_initial_reuse',False):
+        raise ValueError('Stages must solve independently; initial trajectory reuse is not supported')
+    if getattr(args,'source',None)=='smplx' and (getattr(args,'bvh_units','cm')!='cm' or getattr(args,'bvh_translations','absolute')!='absolute'):
+        raise ValueError('BVH conventions do not apply to SMPL-X')
+    if getattr(args,'profile',None) in ('fast','refine'):
+        args.unified_repair = True
+    start = time.perf_counter()
+    out = Path(args.output).resolve()
+    out.mkdir(parents=True, exist_ok=False)
+    atomic_json(out / "run.json", dict(status="running", input=str(Path(args.input).resolve()), mode=args.mode))
+    try:
+        from .v8.convert import convert as run
+        if getattr(args,"ik_block_frames",None) is not None:
+            os.environ["DEX_FRAX_IK_BLOCK_FRAMES"]=str(args.ik_block_frames)
+        if args.source == 'smplx':
+            from .smplx_cli import prepare
+            prepare(args, out)
+        ident = identity(args)
+        atomic_json(out / "identity.json", ident)
+        initial_only = getattr(args, "initial_only", False)
+        initial_from = getattr(args, "initial_from", None)
+        solve = None
+        if args.mode != "v8" and initial_from is None:
+            from .ik import FraxIK
+            solve = FraxIK(args.iterations, args.initial_iterations,
+                           improved=not uses_original_frax(args), assets=ident['assets'])
+        seed_path = getattr(args, "v8_seed", None)
+        if seed_path is not None:
+            from .v8_seed import V8Seed
+            if args.mode != "v8" or args.profile != "refine" or args.allow_local_slowdown:
+                raise ValueError("V8 checkpoint repair requires V8 refine with the original output timeline")
+            solve = V8Seed(seed_path, ident)
+        continuation=getattr(args,'continue_from',None)
+        if continuation is not None:
+            from .refine_resume import locate,verify,Initial
+            continuation = locate(continuation)
+            state = verify(continuation, ident, recheck=getattr(args,'resume_recheck',False))
+            if state.get('from_fast'):
+                continuation = None
+            else:
+                solve = Initial(continuation)
+        if (args.mode == 'frax' and getattr(args,'profile',None) == 'refine' and initial_from is None
+                and continuation is None):
+            from .contact_routed_initial import ContactRoutedInitial
+            solve = ContactRoutedInitial(out,solve,args.iterations,args.initial_iterations,ident['assets'])
+        if initial_only or initial_from is not None:
+            if args.mode != "frax" or args.profile != "refine" or continuation is not None:
+                raise ValueError("Segmented execution requires the Frax refine backbone")
+        if initial_from is not None:
+            from .segments import verify
+            initial_from = Path(initial_from)
+            checkpoint_ident = ident
+            original_implementation = getattr(args, 'checkpoint_implementation', None)
+            if original_implementation is not None:
+                checkpoint_ident = dict(ident, implementation=original_implementation)
+                checkpoint_ident.pop('fingerprint')
+                checkpoint_ident['fingerprint'] = hashlib.sha256(
+                    json.dumps(checkpoint_ident, sort_keys=True).encode()).hexdigest()
+            initial_marker = verify(initial_from, checkpoint_ident)
+            solve = None
+        else:
+            initial_marker = None
+        pkl = out / "motion.pkl"
+        meta = run(args.input, pkl, source=args.source, fps=50., max_frames=args.max_frames,
+                   initial_solver=solve, refine=args.mode == "v8" and getattr(args, 'profile', None) != "refine" and seed_path is None,
+                   prepared_input=getattr(args,"smplx_prepared",None),
+                   unified_repair=getattr(args,"unified_repair",False),repair_similarity=getattr(args,"repair_similarity","soft"), profile=getattr(args,"profile",None), repair_budget=getattr(args,"repair_budget",None),continue_from=continuation,resume_recheck=getattr(args,'resume_recheck',False),allow_local_slowdown=getattr(args,'allow_local_slowdown',False),bvh_units=getattr(args,'bvh_units','cm'),bvh_translations=getattr(args,'bvh_translations','absolute'),foot_contact=getattr(args,'foot_contact',DEFAULT_FOOT_CONTACT),
+                    initial_only=initial_only,initial_from=initial_from,initial_marker=initial_marker,scene=getattr(args,'scene',None),scene_hash=ident.get('conversion_contract',{}).get('scene_sha256'),
+                    repair_modules=getattr(args,'repair_modules',None),repair_plan_only=getattr(args,'repair_plan_only',False),
+                    ground_running=getattr(args,'ground_running',False),
+                    refine_flow=ident['conversion_contract'].get('refine_flow', DEFAULT_REFINE_FLOW))
+        if getattr(args,'repair_plan_only',False):
+            record = dict(status="repair_planned", frames=meta["output_frames"], workload=meta["_repair_plan"])
+            atomic_json(out / "run.json", record)
+            return record
+        if initial_only:
+            from .segments import seal
+            seal(out, ident)
+            record = dict(status="initial_ready", frames=meta["output_frames"],
+                          total_wall_s=time.perf_counter()-start,stage_times_s=meta["stage_times_s"])
+            atomic_json(out/"run.json", record)
+            return record
+        preview_only = getattr(args,'profile',None) == 'fast'
+        if preview_only:
+            import numpy as np
+            with np.load(pkl.with_suffix('.npz'),allow_pickle=False) as data:
+                n=meta['output_frames']
+                if not all(data[k].shape==(n,width) and np.isfinite(data[k]).all()
+                           for k,width in [('root_pos',3),('root_rot',4),('dof_pos',29)]):
+                    raise ValueError('Fast output contains invalid motion arrays')
+        from .acceptance import evaluate
+        from .resource_events import phase
+        result = meta.pop('_unified_quality',None)
+        if result is None:result = evaluate(pkl, meta, solve, args.mode)
+        remaining_repair_s = meta.pop('_remaining_repair_s', 0.)
+        if getattr(args,'allow_local_slowdown',False):
+            from .retiming import final_candidate
+            context = meta.pop('_retiming_ik_context', None)
+            meta,result = final_candidate(pkl,meta,result,solve,args.mode,context=context,
+                                          deadline=time.monotonic()+remaining_repair_s)
+            repair_path = out/(meta.get('unified_repair') or {}).get('report_path','repair.json')
+            if repair_path.is_file():
+                repair = json.loads(repair_path.read_text())
+                repair['final_retiming'] = (meta.get('retiming') or {}).get('final_adaptation')
+                if (repair['final_retiming'] or {}).get('decision') == 'pending_budget':
+                    repair.update(status='pending_budget', shared_budget_exhausted=True)
+                atomic_json(repair_path,repair)
+        result.update(schema='dex_motion_quality_v1', backend='dex-retarget', solver_mode=args.mode,
+                      scope='kinematic_pose_contact_geometry', model_sha256=meta['model_sha256'],
+                      input_sha256=meta['input_sha256'], output_sha256=sha(pkl))
+        if args.source == 'smplx':
+            result['input_report'] = ident['smplx_input']['parameters']
+        result['profile']=getattr(args,'profile',None)
+        if result['profile'] == 'refine':
+            result['refine_flow'] = ident['conversion_contract']['refine_flow']
+        if preview_only:
+            result.update(status='review', audit_status=result['status'], frames=meta['output_frames'],
+                          source_review=meta.get('source_review'))
+        flags = result["flags"]
+        training = not flags and not preview_only
+        atomic_json(out / "quality.json", result)
+        phase('export')
+        if training:
+            export_training(pkl, out / "training.npz", ident)
+        from .pipeline_explain import write_stage_report
+        write_stage_report(out, meta, result, ident, dict(status='complete', mode=args.mode, fps=50.,
+            pipeline='unified' if getattr(args,'unified_repair',False) else 'reference',
+            training_npz='training.npz' if training else None))
+        files = {p.name: sha(p) for p in sorted(out.iterdir()) if p.is_file() and p.name != "run.json"}
+        record = dict(status="complete", quality=result["status"], acceptance_policy="common_pose_geometry_v1", mode=args.mode, frames=meta["output_frames"],
+                      fps=50., total_wall_s=time.perf_counter() - start, stage_times_s=meta["stage_times_s"],
+                      frax=meta["frax"], flags=result["flags"], fingerprint=ident["fingerprint"], files=files,
+                      training_npz="training.npz" if training else None)
+        record['profile']=getattr(args,'profile',None)
+        if record['profile'] == 'refine':
+            record['refine_flow'] = result['refine_flow']
+        record['pipeline']='unified' if getattr(args,'unified_repair',False) else 'reference'
+        record['unified_repair']=meta.get('unified_repair')
+        recovery=meta.get('self_collision',{}).get('graduated_repair',{})
+        record['collision_repair_exhausted']=bool('arm_self_collision_unresolved' in flags and recovery.get('all_unresolved_tried_all_tiers',False))
+        record['collision_repair_outcome']=recovery.get('outcome','not_attempted')
+        atomic_json(out / "run.json", record)
+        print(json.dumps({k: record[k] for k in ("status", "quality", "frames", "total_wall_s", "flags")}, ensure_ascii=False, indent=2))
+        return record
+    except BaseException as exc:
+        atomic_json(out / "run.json", dict(status="failed", error=repr(exc), error_type=type(exc).__name__, elapsed_s=time.perf_counter() - start))
+        raise
+
+
+def single_auto(args,worker_factory=None):
+    """Default unified backbone, or explicitly selected two-stage reference."""
+    if args.source == 'smplx':
+        from .smplx_cli import single_auto as smplx_auto
+        return smplx_auto(args, worker_factory)
+    import tempfile
+    from . import cascade
+    from .resources import output_frames
+    source=Path(args.input).resolve()
+    contents=dict(cases=[dict(id='motion',input=str(source),input_sha256=sha(source),source=args.source,
+                             ground_running=getattr(args,'ground_running',False))])
+    with tempfile.TemporaryDirectory(prefix='dex-single-') as scratch:
+        manifest=Path(scratch)/'manifest.json';atomic_json(manifest,contents)
+        options=argparse.Namespace(**vars(args));options.manifest=manifest;options.single_pipeline=True
+        options.budget=getattr(args,'budget',86400.)
+        if getattr(args,'profile',None) in ('fast','refine'):
+            options.frax_timeout=options.v8_timeout=options.budget
+        else:
+            frames=output_frames(source)
+            options.frax_timeout=max(900.,300.+.5*frames)
+            options.v8_timeout=max(1800.,600.+1.5*frames)
+        records=cascade.run(options,worker_factory or cascade.Worker)
+    out=Path(args.output).resolve();batch=json.loads((out/'batch.json').read_text());record=records[0]
+    atomic_json(out/'run.json',dict(status=batch['status'],quality=record['status'],mode='auto',
+        selected_mode=record['selected_mode'],selected_output=record['selected_output'],preview_output=record.get('preview_output'),
+        training_npz=record['training_npz'],total_wall_s=batch['elapsed_s']))
+    return record
+
+
+def batch(args):
+    """One process, separate checked outputs; cached IK never caches motions."""
+    import contextlib
+    manifest_path=Path(args.manifest).resolve()
+    from .cascade import load_manifest
+    cases=load_manifest(manifest_path)
+    out=Path(args.output).resolve();out.mkdir(parents=True,exist_ok=False)
+    started=time.perf_counter();records=[]
+    for row in cases:
+        record=dict(case=row['id'],status='budget_not_run')
+        if time.perf_counter()-started < args.budget:
+            case=argparse.Namespace(input=manifest_path.parent/row['input'],output=out/row['id'],
+                source=row['source'],mode=args.mode,iterations=args.iterations,
+                ground_running=row.get('ground_running', False),
+                initial_iterations=args.initial_iterations,max_frames=None,legacy_frax=False,bvh_units=getattr(args,'bvh_units','cm'),bvh_translations=getattr(args,'bvh_translations','absolute'),foot_contact=getattr(args,'foot_contact',DEFAULT_FOOT_CONTACT))
+            try:
+                with (out/(row['id']+'.log')).open('w') as stream, contextlib.redirect_stdout(stream), contextlib.redirect_stderr(stream):
+                    result=convert(case)
+                record.update(status='complete',quality=result['quality'],flags=result['flags'],
+                    total_wall_s=result['total_wall_s'],cache=result['frax'].get('runtime_cache') if result['frax'] else None)
+            except Exception as exc:
+                record.update(status='failed',error=repr(exc))
+                from .ik import clear_runtime_cache
+                clear_runtime_cache()
+        records.append(record)
+        atomic_json(out/'batch.json',dict(manifest_sha256=sha(manifest_path),mode=args.mode,
+            elapsed_s=time.perf_counter()-started,records=records))
+        print(row['id'],record['status'],record.get('quality'),flush=True)
+    return records
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Dex retargeting: complete fast conversion or window-based refine")
+    refine_flow_help = (f'Default {DEFAULT_REFINE_FLOW} in refine mode. '
+                        'A is the 0.8.4 specialist-order baseline. '
+                        'B tests the 1.0.4 cascade and C tests support-phase windows.')
+    sub = parser.add_subparsers(dest="command", required=True)
+    conv = sub.add_parser("convert")
+    conv.add_argument("input", type=Path)
+    conv.add_argument("output", type=Path, help="New output directory; existing directories are never overwritten")
+    conv.add_argument("--source", choices=["auto", "lafan", "soma", "mocap", "smplx"], default="auto")
+    conv.add_argument("--ground-running", action="store_true",
+                      help="Declare unaided ground running to enable the human horizontal sprint review")
+    conv.add_argument('--bvh-units',choices=['cm','m','mm'],default='cm',help='BVH length units; default cm, never inferred')
+    conv.add_argument('--bvh-translations',choices=['absolute','offset'],default='absolute',help='BVH position channels: absolute values or deltas added to OFFSET')
+    conv.add_argument("--mode", choices=["fast", "refine"], default="fast")
+    conv.add_argument('--foot-contact', choices=['v1', 'v2'], default=DEFAULT_FOOT_CONTACT, help=f'Foot contact target policy (default: {DEFAULT_FOOT_CONTACT})')
+    conv.set_defaults(repair_similarity='soft')
+    conv.add_argument('--continue-from',type=Path,help='Refine only: continue a checked checkpoint into a new directory without rerunning IK')
+    conv.add_argument('--recheck-from',type=Path,help='Refine only: after code updates, verify source/model and artifacts, freshly audit, preserve motion/reference, rebuild repair queue')
+    conv.add_argument('--scene',type=Path,help='Refine only: measured scene boxes in robot export coordinates')
+    conv.add_argument('--allow-local-slowdown',action=argparse.BooleanOptionalAction,default=None,
+                      help='Refine defaults to local frame insertion for motor-speed violations; disable to preserve timing')
+    conv.add_argument('--repair-budget',type=_repair_budget_arg,metavar='SECONDS|unlimited',
+                      help='Shared repair seconds or unlimited (default: 0.5 × whole input frames at 50 Hz)')
+    conv.add_argument('--refine-flow', choices=REFINE_FLOWS,
+                      help=refine_flow_help)
+    conv.add_argument('--budget',type=float,default=86400.,help='Total seconds including preparation, IK, repair and final audit')
+    conv.add_argument("--iterations", type=int, default=8)
+    conv.add_argument("--initial-iterations", type=int, default=100)
+    conv.add_argument("--max-frames", type=int)
+    from .smplx_cli import add_options
+    add_options(conv)
+    checking=sub.add_parser('check-input',help='Read-only validation of SMPL-X parameters; no geometry or IK')
+    checking.add_argument('input',type=Path)
+    add_options(checking)
+    batching=sub.add_parser('batch',help='Run a hash-pinned manifest with resource-guarded CPU workers and independent solvers')
+    batching.add_argument('manifest',type=Path)
+    batching.add_argument('output',type=Path)
+    batching.add_argument('--bvh-units',choices=['cm','m','mm'],default='cm',help='BVH length units; default cm, never inferred')
+    batching.add_argument('--bvh-translations',choices=['absolute','offset'],default='absolute',help='BVH position channels: absolute values or deltas added to OFFSET')
+    batching.add_argument('--mode',choices=['fast','refine'],default='fast')
+    batching.add_argument('--foot-contact', choices=['v1', 'v2'], default=DEFAULT_FOOT_CONTACT, help=f'Foot contact target policy (default: {DEFAULT_FOOT_CONTACT})')
+    batching.set_defaults(repair_similarity='soft')
+    batching.add_argument('--iterations',type=int,default=8)
+    batching.add_argument('--initial-iterations',type=int,default=100)
+    batching.add_argument('--allow-local-slowdown',action=argparse.BooleanOptionalAction,default=None,
+                          help='Refine defaults to local frame insertion for motor-speed violations')
+    batching.add_argument('--repair-budget',type=_repair_budget_arg,metavar='SECONDS|unlimited',
+                          help='Shared repair seconds per motion or unlimited (default: 0.5 × whole input frames at 50 Hz)')
+    batching.add_argument('--refine-flow', choices=REFINE_FLOWS,
+                          help=refine_flow_help)
+    batching.add_argument('--budget',type=float,default=1800.,help='Total seconds; stop owned workers when exhausted in any batch mode')
+    batching.add_argument('--workers',default='auto',help='Maximum worker slots; memory admission may use fewer')
+    batching.add_argument('--resource-mode',choices=['dynamic','manual'],default='dynamic',help='Dynamic host-load admission by default; manual retains fixed resource settings')
+    batching.add_argument('--memory-target-percent',type=float,default=90.,help='Dynamic mode host used-memory ceiling, including other programs and the system')
+    batching.add_argument('--memory-reserve-gib',type=float,help='Optional additional minimum host memory reserve; manual default is 10 GiB')
+    batching.add_argument('--memory-limit-gib',type=float,help='Optional lower Linux cgroup hard limit, also enables containment for one worker')
+    batching.add_argument('--disk-reserve-gib',type=float,default=80.)
+    batching.add_argument('--worker-peak-gib',type=float,default=3.75,help='Frax cold baseline; excess over resident budget is reserved once for the compiler')
+    batching.add_argument('--worker-resident-gib',type=float,default=1.,help='Frax resident baseline, plus per-frame memory')
+    batching.add_argument('--completion-worker-gib',type=float,help='Full-lifecycle resident budget for one protected worker, plus length increment; default cold baseline')
+    batching.add_argument('--frame-memory-kib',type=float,default=32.,help='Initial per-output-frame memory budget, hot-reloadable per stage')
+    batching.add_argument('--resource-policy',type=Path,help='Live resource-only JSON; defaults to output/resource_policy.json, checked every 2 seconds')
+    batching.add_argument('--no-memory-learning',action='store_true',help='Use configured length and stage estimates without learning')
+    batching.add_argument('--ik-block-frames',type=int,default=128,help='Fixed IK execution block length, with carried state across blocks')
+    batching.add_argument('--segmented',action='store_true',help='Refine only: queue the verified Frax results for a separate repair process')
+    batching.add_argument('--resume',action='store_true',help='Verify and retain completed attempts in an interrupted batch; retry unfinished stages')
+    batching.add_argument('--resource-wait',type=float,default=0.,help='Manual-mode idle resource wait limit; 0 waits until the total batch budget')
+    batching.add_argument('--frax-timeout',type=float,help='Per-motion worker deadline; partial refined output is retained')
+    batching.add_argument('--capacity-scheduler', action='store_true',
+                          help='Dispatch verified Frax and repair subprocesses by CPU and memory budgets')
+    from .retarget_batch import add_options as add_capacity_options
+    add_capacity_options(batching)
+    batching.set_defaults(v8_timeout=None)
+    explaining = sub.add_parser('explain', help='Explain existing retarget records without IK, re-audit or changing old outputs')
+    explaining.add_argument('result', type=Path, help='One motion result directory or robot PKL/NPZ with JSON sidecars')
+    explaining.add_argument('--output', type=Path, help='New directory for pipeline.json and pipeline.md; default prints only')
+    explaining.add_argument('--format', choices=['markdown','json'], default='markdown', help='Console format')
+    probe = sub.add_parser('probe-contact',help='Free-base PD rollout and surface diagnostics on an exported window')
+    probe.add_argument('result',type=Path)
+    probe.add_argument('--start',required=True,type=int)
+    probe.add_argument('--frames',type=int,default=31)
+    probe.add_argument('--initial-from',type=Path,help='Use this same-source result for paired initial state')
+    probe.add_argument('--scene',type=Path,help='Measured axis-aligned boxes in robot export coordinates')
+    probe.add_argument('--output',type=Path)
+    preview = sub.add_parser("preview")
+    preview.add_argument("motions", nargs="+", type=Path)
+    preview.add_argument("--output", type=Path, required=True)
+    preview.add_argument("--fps", type=int, default=25)
+    args = parser.parse_args()
+    if args.command in ('convert','batch'):
+        if args.refine_flow is not None and args.mode != 'refine':
+            parser.error('--refine-flow requires --mode refine')
+        args.refine_flow = args.refine_flow or DEFAULT_REFINE_FLOW
+        if args.allow_local_slowdown is None:
+            args.allow_local_slowdown = args.mode == 'refine'
+        if getattr(args,'source',None)=='smplx' and (args.bvh_units!='cm' or args.bvh_translations!='absolute'):parser.error('BVH unit/translation options do not apply to SMPL-X; use --units for SMPL-X')
+        # Normalize only after public parsing: no public V8/auto/two-stage entry.
+        if getattr(args,'recheck_from',None) is not None:
+            if args.mode!='refine' or getattr(args,'continue_from',None) is not None:parser.error('recheck-from requires refine and excludes continue-from')
+            args.continue_from=args.recheck_from;args.resume_recheck=True
+        if getattr(args,'continue_from',None) is not None and args.mode!='refine':parser.error('continue-from requires refine')
+        if getattr(args,'scene',None) is not None and args.mode!='refine':parser.error('--scene requires refine')
+        if args.allow_local_slowdown and args.mode!='refine':parser.error('allow-local-slowdown requires refine')
+        args.profile=args.mode;args.mode='auto';args.pipeline='unified'
+        args.legacy_frax=True;args.v8_worker_peak_gib=1.
+        args.unified_repair=True
+
+    if args.command == 'probe-contact':
+        from .contact_probe import probe
+        try:
+            info=probe(args.result,args.start,args.frames,args.initial_from,args.scene)
+            if args.output is None:print(json.dumps(info,indent=2,default=_json_scalar))
+            else:
+                with args.output.open('x') as stream:json.dump(info,stream,indent=2,default=_json_scalar,allow_nan=False)
+        except (ValueError,OSError,KeyError) as exc:
+            parser.exit(2,'Contact probe failed: '+str(exc)+'\n')
+        return
+    if args.command == 'explain':
+        from .pipeline_explain import explain, render, write_report
+        try:
+            report = explain(args.result)
+            if args.output is not None:
+                args.output.mkdir(parents=True, exist_ok=False)
+                write_report(report, args.output)
+                print(str(args.output.resolve()))
+            else:
+                print(json.dumps(report, ensure_ascii=False, indent=2) if args.format=='json' else render(report))
+        except (OSError, ValueError) as exc:
+            parser.exit(2, 'Cannot explain result: '+str(exc)+'\n')
+        return
+    if args.command == 'check-input':
+        from .smplx_cli import check_input
+        parser.exit(check_input(args))
+    if args.command == "convert":
+        if args.source == 'auto' and args.input.suffix.lower() in ('.npz','.pt','.pkl'):
+            args.source = 'smplx'
+        if args.source != 'smplx' and args.grounding != 'off':
+            parser.error('--grounding applies only to SMPL-X input')
+        if min(args.iterations, args.initial_iterations) < 1 or (args.max_frames is not None and args.max_frames < 3):
+            parser.error("Iteration counts must be positive; max-frames must be >= 3")
+        if not math.isfinite(args.budget) or args.budget<=0:parser.error('Budget must be finite and positive')
+        from .input_errors import MotionInputError
+        try:
+            if args.mode=='auto':record=single_auto(args)
+            else:record=convert(args)
+            if isinstance(record,dict) and record.get('status') in ('failed','budget_exhausted','input_error'):
+                status = record['status']
+                detail = next((attempt['error'] for attempt in reversed(record.get('attempts', []))
+                               if attempt.get('status') == 'input_error' and attempt.get('error')), None)
+                message = detail or 'See the output records.'
+                parser.exit(2 if status=='input_error' else 1, f'Conversion did not complete ({status}). {message}\n')
+        except MotionInputError as exc:
+            parser.exit(2,'Motion input error: '+str(exc)+'\n')
+    elif args.command == 'batch':
+        values=[args.iterations,args.initial_iterations,args.budget,args.memory_target_percent,args.disk_reserve_gib,args.worker_peak_gib,args.worker_resident_gib,args.frame_memory_kib,args.ik_block_frames,args.v8_worker_peak_gib]+[getattr(args,m+'_timeout') for m in ('frax','v8') if getattr(args,m+'_timeout') is not None]+([args.memory_limit_gib] if args.memory_limit_gib is not None else [])+([args.memory_reserve_gib] if args.memory_reserve_gib is not None else [])
+        if not math.isfinite(args.resource_wait) or args.resource_wait<0:
+            parser.error('Resource wait must be finite and nonnegative')
+        if args.completion_worker_gib is not None and (not math.isfinite(args.completion_worker_gib) or args.completion_worker_gib<=0):
+            parser.error('Completion worker budget must be finite and positive')
+        if any(not math.isfinite(v) or v<=0 for v in values):
+            parser.error('Batch iteration counts and budgets must be finite and positive')
+        if args.worker_resident_gib>args.worker_peak_gib:parser.error('Resident memory cannot exceed cold-worker peak')
+        if not 50<=args.memory_target_percent<=95:parser.error('Memory target percent must be between 50 and 95')
+        if args.segmented and args.profile!='refine':parser.error('--segmented requires --mode refine')
+        if args.capacity_scheduler:
+            from .retarget_batch import batch as capacity_batch
+            parser.exit(capacity_batch(args, parser))
+        if args.plan_only:
+            parser.error('--plan-only requires --capacity-scheduler')
+        from .resources import contain_linux
+        contained = contain_linux(args)
+        if contained is not None:
+            if contained:
+                parser.exit(contained)
+            return
+        from .managed_batch import run
+        records = run(args)
+        batch_status = json.loads((args.output / 'batch.json').read_text())['status']
+        failed = [row['status'] for row in records if row['status'] not in ('accepted', 'review', 'accepted_with_notes')]
+        if batch_status != 'complete' or failed:
+            code = 2 if batch_status == 'complete' and set(failed) == {'input_error'} else 1
+            parser.exit(code, f'Batch did not finish all cases ({batch_status}). See batch.json.\n')
+    else:
+        from .preview import render
+        render(args.motions, args.output, args.fps)
+
+
+if __name__ == "__main__":
+    main()

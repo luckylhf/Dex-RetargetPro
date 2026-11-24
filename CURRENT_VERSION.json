@@ -1,0 +1,17 @@
+{
+  "package_version": "1.0.4",
+  "solver_policy": "frax_source_pose_land_then_protected_v1",
+  "refine_initial_policy": "trusted_nonfoot_contact_sections_v3",
+  "quality_policy": "scoped_collision_support_temporal_v10",
+  "default_mode": "fast",
+  "default_refine_flow": "A",
+  "robot": "tienkung_dex_29",
+  "window_budget_s": 50,
+  "default_repair_seconds_per_frame": 0.5,
+  "default_repair_frame_basis": "full_input_at_50hz",
+  "specialist_candidate_budget_s": 20,
+  "refine_budget_config": "src/dex_frax/refine_budget.json",
+  "validation_scope": "offline kinematics, declared geometry and finite inter-frame sampling",
+  "hardware_validation": "not_performed",
+  "full_library_validation": "not_performed"
+}

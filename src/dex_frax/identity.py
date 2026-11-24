@@ -1,0 +1,6 @@
+CONVERTER = "dex_frax"
+CONVERTER_RELEASE = "dex_frax_1.0.4"
+SOLVER_POLICY = "frax_source_pose_land_then_protected_v1"
+FULL_CLIP_INITIAL_POLICY = "full_clip_pose_landing_conditional_pelvis_priority_v2"
+REFINE_INITIAL_POLICY = "trusted_nonfoot_contact_sections_v3"
+QUALITY_POLICY = "scoped_collision_support_temporal_v10"

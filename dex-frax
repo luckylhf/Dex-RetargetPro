@@ -1,0 +1,20 @@
+#!/bin/sh
+set -eu
+release_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+python_bin=${DEX_FRAX_PYTHON:-"$release_dir/.venv/bin/python"}
+if [ ! -x "$python_bin" ]; then
+    python_bin=python3
+fi
+if [ -x "$release_dir/.venv/smplx-env/bin/python" ]; then
+    export SMPLX_PYTHON="${SMPLX_PYTHON:-$release_dir/.venv/smplx-env/bin/python}"
+fi
+if [ -d "$release_dir/.venv/smplx-models/smplx" ]; then
+    export SMPLX_MODEL_DIR="${SMPLX_MODEL_DIR:-$release_dir/.venv/smplx-models}"
+fi
+source_paths="$release_dir/src"
+if [ -d "$release_dir/Dex-StanfordASL-frax/frax" ]; then
+    source_paths="$source_paths:$release_dir/Dex-StanfordASL-frax"
+fi
+export PYTHONPATH="$source_paths${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONDONTWRITEBYTECODE=1
+exec "$python_bin" -m dex_frax "$@"

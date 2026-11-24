@@ -1,0 +1,29 @@
+.venv/
+Dex-StanfordASL-frax/
+.DS_Store
+__pycache__/
+*.pyc
+*.egg-info/
+/build/
+/dist/
+/outputs/
+/.local-data/
+# Checked-in human motion inputs
+/examples/*
+!/examples/bvh/
+!/examples/smplx/
+/examples/bvh/**
+!/examples/bvh/**/
+!/examples/bvh/**/*.bvh
+/examples/smplx/**
+!/examples/smplx/**/
+!/examples/smplx/**/*.pt
+
+# Local development summary
+/INTERNAL_DEVELOPMENT_SUMMARY.md
+
+# Local human reference data and retired regression files
+/src/dex_frax/v8/reference/lafan1_surfaces.json
+/src/dex_frax/v8/reference/soma_surfaces.json
+/tests/fixtures/motor_timing/possible_platform.bvh
+/tests/fixtures/motor_timing/possible_platform.initial.npz

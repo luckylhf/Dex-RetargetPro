@@ -1,0 +1,380 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Robot-Retarget 1.0.4 · 编号流程图</title>
+<style>
+:root { color-scheme:light; --ink:#172b3a; --dim:#4c6271; --accent:#126754; --line:#bdcbd1; --paper:#f3f6f6; }
+* { box-sizing:border-box; }
+body { margin:0; color:var(--ink); background:var(--paper); font: 15px/1.55 system-ui,"PingFang SC","Microsoft YaHei",sans-serif; }
+main { max-width:1260px; margin:auto; padding:38px 28px 72px; }
+h1 { margin:4px 0 8px; font-size:clamp(28px,4vw,46px); line-height:1.16; letter-spacing:-.035em; }
+h2 { margin:0; font-size:24px; line-height:1.25; }
+p { margin:7px 0; }
+.eyebrow { color:var(--accent); font-size:13px; font-weight:750; }
+header p { max-width:70ch; color:var(--dim); }
+nav { display:flex; flex-wrap:wrap; gap:6px; margin:20px 0 12px; }
+nav a { color:var(--ink); text-decoration:none; background:white; padding:7px 12px; border:1px solid var(--line); border-radius:6px; font-size:14px; }
+nav a:hover, nav a:focus-visible { border-color:var(--accent); color:var(--accent); }
+.legend { display:flex; flex-wrap:wrap; gap:14px; margin:12px 0 20px; color:var(--dim); font-size:13px; }
+.legend span { display:flex; align-items:center; gap:6px; }
+.key { display:inline-block; width:12px; height:12px; border-radius:3px; border:1px solid #788b96; background:white; }
+.key.decision { border-color:#a0782b; background:#fff7df; }
+.key.done { border-color:#448374; background:#e9f6f0; }
+.panel { background:white; border:1px solid #cbd8dc; border-radius:12px; margin:0 0 22px; overflow:hidden; scroll-margin-top:8px; }
+.panel header { padding:20px 24px 15px; border-bottom:1px solid #e3ebed; }
+.chart { overflow-x:auto; background:#fbfdfd; }
+svg { width:100%; min-width:860px; display:block; font-family:inherit; }
+.edge { fill:none; stroke:#5e7783; stroke-width:1.65; }
+.edge.loop { stroke:#526e7d; stroke-dasharray:6 4; }
+.edge-label { font-size:11.8px; fill:#304d5e; paint-order:stroke; stroke:#fbfdfd; stroke-width:5px; stroke-linejoin:round; font-weight:650; }
+.node { cursor:pointer; }
+.node .box { fill:#fff; stroke:#8ea4ae; stroke-width:1.2; }
+.node.decision .box { fill:#fff7df; stroke:#aa833d; }
+.node.done .box { fill:#e9f6f0; stroke:#4b8877; }
+.node .badge { fill:#284b60; }
+.node.decision .badge { fill:#715111; }
+.node.done .badge { fill:#126754; }
+.node .code { fill:#fff; font-size:12px; font-weight:750; font-variant-numeric:tabular-nums; }
+.node .label { fill:#142d40; font-size:15px; font-weight:730; }
+.node .desc { fill:#425867; font-size:12.5px; }
+.node:hover .box, .node:focus .box, .node:target .box, .node.selected .box { stroke:#094f9b; stroke-width:2.8; }
+.node:focus { outline:none; }
+details { margin:18px 24px; color:var(--dim); }
+summary { cursor:pointer; }
+dialog { border:1px solid var(--line); border-radius:12px; max-width:min(520px, calc(100% - 28px)); padding:22px; color:var(--ink); }
+dialog::backdrop { background:#182b3b55; }
+dialog h2 { font-size:20px; margin:0 0 12px; }
+dialog p { margin:12px 0 15px; }
+dialog a { display:block; width:fit-content; color:#0e5f64; overflow-wrap:anywhere; }
+dialog .actions { display:flex; gap:9px; margin-top:18px; justify-content:flex-end; }
+button { font:inherit; cursor:pointer; color:var(--ink); border:1px solid var(--line); background:white; border-radius:6px; padding:6px 11px; }
+button[data-copy] { background:#126754; border-color:#126754; color:white; }
+@media(max-width:650px) { main { padding:20px 12px 44px; } .panel header { padding:15px; } }
+@media print { body, .chart { background:white; } main { padding:0; } nav, dialog { display:none!important; } .panel { break-before:page; margin:0; border:0; } .panel:first-of-type { break-before:auto; } svg { min-width:0; max-height:245mm; } .panel header { padding:5mm 0 2mm; } }
+</style>
+</head>
+<body>
+<main>
+<header>
+<p class="eyebrow">Robot-Retarget 1.0.4</p>
+<h1>Fast / Refine 详细流程图</h1>
+<p>从 BVH 或 SMPL-X 输入到终验导出。每个步骤和判断点都有唯一编号，点节点可查看细节、对应源码和复制编号。</p>
+</header>
+<nav id="contents" aria-label="流程分段"></nav>
+<div class="legend"><span><i class="key"></i>处理</span><span><i class="key decision"></i>判断</span><span><i class="key done"></i>流入下一阶段或产物</span><span>虚线表示返回复检、复用或再次调度</span></div>
+<div id="panels"></div>
+<noscript>请开启浏览器的 JavaScript 以绘制此本地流程图。</noscript>
+</main>
+<dialog id="detail" aria-labelledby="detail-heading">
+<h2 id="detail-heading"></h2>
+<p id="detail-text"></p>
+<a id="detail-source"></a>
+<div class="actions"><button data-copy>复制编号</button><form method="dialog"><button>关闭</button></form></div>
+</dialog>
+<script>
+const groups = [
+  {
+    key:'input', name:'输入、接触标定和续跑', range:'01–13',
+    note:'fast、refine 均先审查输入源，BVH 与 SMPL-X 都使用原生帧审查。批处理对每条动作独立计时。',
+    nodes:[
+      [1,500,0,'p','进入 fast 或 refine','两种模式先检查原始输入，使用新输出目录','cli.py::main','公开参数还包括精修预算、场景、脚接触版本和最大帧数。批处理可将初解和精修拆成两个进程。'],
+      [2,500,1,'q','读取哪类人体动作','显式指定来源，或按文件判定','cli.py::main'],
+      [3,175,2,'p','BVH 全部原生帧审查','首尾异常剔除，中间按前后帧判定','source_integrity.py::inspect','原生帧率下扫描全片位移、关节转角和相邻速率。已确认的首尾异常从工作序列剔除。中间单帧、多帧和多关节异常均检查两侧，候选通过复检才采用。相邻或重叠的异常按原始帧号归并。'],
+      [4,825,2,'p','SMPL-X 全部原生帧审查','用相同规则审查，再准备人体几何','smplx_input.py::prepare_source_samples','与 BVH 使用同一套首尾异常和中间坏帧策略。审查后才重采样并生成 SMPL-X 模型关节及脚底见证点。'],
+      [5,175,3,'p','BVH 重采样并复检','50 Hz，用已审查的原生帧核验采样网格','source_integrity.py::recheck_bvh'],
+      [6,825,3,'p','加载并适配 SMPL-X','统一到 50 Hz 并和原生结果对照复检','smplx_input.py::prepare_source_samples'],
+      [7,500,4,'p','建立机器人拟合目标','骨盆、腰、腿脚、手臂、手掌','v8/contacts.py::prepare','加载 Dex 29 轴模型，按人体比例和标定建立身体方向、足底、脚锚和可信身体接触目标。'],
+      [8,500,5,'p','应用支撑和场景证据','足部默认 v2，推断接触、腾空和平台','v8/contacts.py::prepare','足部 v2 根据脚跟和脚尖离地高度、速度及稳定时长推断接触。GVHMR 的静止分数可用于可选的垂直漂移校正。实测场景可分配平台锚点。腾空和未确认高处支撑进入高度保护。'],
+      [9,500,6,'q','允许局部放慢？','refine 默认开启','cli.py::main'],
+      [10,825,7,'p','建立源时间映射','已配置根部速度边界时按允许区间限速','retiming.py::apply','用当前源帧网格建立时间映射。配置了根部线速度或角速度限值时，才按相应限值处理。关节补帧在 76–81。续跑按需核验旧时间映射。'],
+      [11,500,8,'q','使用哪种入口状态？','核对源、模型、目标和检查点','initial_reuse.py::target_digest','计算已准备目标的指纹。续跑按对应的模式核验工件。经过核验的 fast 结果转入 refine 时仍会重做 refine 初解。'],
+      [12,175,9,'d','新动作 → 求初解','fast：简化 Frax → 47；refine → 14','cli.py::convert'],
+      [13,825,9,'d','恢复精修 → 49','从检查点恢复轨迹和修复状态','refine_resume.py::verify','完整 refine 续跑或分段精修使用核验通过的底稿。recheck-from 在允许的实现变化下保留轨迹和固定参考，重做审查并重建队列。']
+    ],
+    edges:[[1,2],[2,3,'BVH'],[2,4,'SMPL-X'],[3,5],[4,6],[5,7],[6,7],[7,8],[8,9],[9,10,'开启'],[9,11,'关闭'],[10,11],[11,12,'新初解'],[11,13,'已核验的 refine 底稿']]
+  },
+  {
+    key:'routing', name:'初解分流与接触式初解', range:'14–23',
+    note:'14–46 是 refine 初解路线。混合动作先在同一份目标和时间轴上求全长参考，再按区间取用姿态。',
+    nodes:[
+      [14,500,0,'p','判定每一帧的支撑','足接触／平台、腾空、身体接触证据','contact_routed_initial.py::contact_routes','可信的非脚部接触包含膝胫和上身支撑。支撑未确认时使用接触式初解。'],
+      [15,500,1,'p','生成两类原始标记','可信非脚部支撑且未腾空 → 落地初解','contact_routed_initial.py::contact_routes','腾空帧始终使用接触式初解。区间扩张规则见 37–46。'],
+      [16,500,2,'q','整段属于哪一类？','全片落地、全片接触式或混合','contact_routed_initial.py::ContactRoutedInitial.__call__'],
+      [17,825,3,'d','全片落地 → 24','以全片落地解作为最终初解参考','contact_routed_initial.py::ContactRoutedInitial.landing_reference'],
+      [18,500,3,'p','接触式 Frax 初解','用已标定的脚接触目标求解','contact_routed_initial.py::ContactRoutedInitial.contact_first','保存 contact_first_raw。骨盆、身体姿态和脚部接触目标已进入求解。'],
+      [19,500,4,'p','先确定腰部轨迹','将腰部结果固化给后面的腿脚解','pelvis_priority.py::waist_trajectory'],
+      [20,500,5,'q','下身碰撞可走局部？','先查原帧，再查帧间八等分','initial_lower.py::classify','局部路线的上限为 4 个窗、合计 0.8 秒、最长连续 0.4 秒、最深碰撞 6 mm。任一门槛未过则走全片腿脚。'],
+      [21,175,6,'q','局部腿脚处理通过？','少量窗口，复检支撑、净空、扫掠、自碰撞和抖动','initial_lower.py::route','局部尝试的单窗上限在这里是 30 秒。所有相关窗口通过才采用局部结果。没有待修碰撞窗时直接通过。'],
+      [22,825,6,'p','全片联解腿脚','联动骨盆 Z 与腿轴，腰和其余轴固定','pelvis_priority.py::solve_protected','这一支按脚目标和腿部碰撞求解。'],
+      [23,500,7,'d','锁下身解双臂','全片接触式 → 47，混合 → 24','pelvis_priority.py::solve_protected','保存接触式参考 contact_first。混合动作接着求出全长落地参考，之后进入 37。']
+    ],
+    edges:[[14,15],[15,16],[16,17,'全片落地'],[16,18,'接触式或混合'],[18,19],[19,20],[20,21,'可局部'],[20,22,'须全片'],[21,22,'局部未通过'],[21,23,'通过'],[22,23]]
+  },
+  {
+    key:'landing', name:'抬升、落地和全片避碰', range:'24–36',
+    note:'24–36 处理整条落地参考。混合动作只在最后采用扩张区间内的落地轨迹。',
+    nodes:[
+      [24,500,0,'p','Frax 纯姿态初解','拟合源身体姿态、骨段和原始脚掌方向','full_chain_initial.py::FullClipInitial.__call__','使用 pose_only 和 raw_foot_r。记录原始姿态的相对源抖动、关节超速和根部突变，保存原始姿态快照。'],
+      [25,500,1,'p','识别需要抬升的区间','已标注接触，或机器人穿地超过 1 mm','initial_landing.py::lift_and_land','用全身模型的帧间净空找候选区间，排除高度受保护的腾空、平台及未确认支撑帧。'],
+      [26,500,2,'p','整段沿 Z 抬升并计算回落','按支撑点或先将触地的外壳截停','initial_landing.py::lift_and_land','每个连续段采用统一抬升量。回落目标逐帧由最低点决定，回落种子的 Z 修正还会做高斯平滑。'],
+      [27,500,3,'p','锁骨盆 XY，执行落地 Frax','按接触锚点和净空联合拟合姿态','initial_landing.py::solve_landing'],
+      [28,500,4,'p','平滑抬升帧的落地修正','联解骨盆 Z 与腿部修正，检查后采用','lift_continuity.py::smooth_landing','只修改实际抬升且允许修改的帧。复查净空、接触、限位、速度和曲率等，合格才采用平滑候选。'],
+      [29,500,5,'q','原帧自碰撞是否大范围？','超数量阈值，且存在长段或至少 5 段','full_chain_initial.py::collision_trigger','数量须大于 max(ceil(0.8×fps), ceil(0.05×总帧数))，并且最长连续段至少 ceil(0.4×fps) 帧，或碰撞段数至少 5。门槛用原帧，帧间采样另记。'],
+      [30,500,6,'p','求解并锁定腰部','全片腰部解带约束复核','pelvis_priority.py::waist_trajectory'],
+      [31,500,7,'p','全片联解骨盆 Z 与双腿','固定腰与其他轴，复用落地约束','pelvis_priority.py::solve_protected'],
+      [32,500,8,'q','腿解后有接触退化？','对照落地前案的净空、支撑高度、脚锚和滑移','post_leg_contact.py::affected_frames','只有存在标注支撑且未受保护的退化帧形成重落地窗口。'],
+      [33,175,9,'p','重落地并平滑修正','先 Z 调整，再按需联解 Z 与双腿','post_leg_contact.py::reland','固定骨盆 XY、腰、双臂、窗口边界和保护帧。联合求解分支的局部求解上限为 6 秒。'],
+      [34,175,10,'q','采用重落地候选？','接触改善，按原帧和帧间复检','post_leg_contact.py::check_candidate','复检穿地、自碰撞、关节限位、速度、根部 Z 和接缝。任一候选未通过则保留此前腿解，供后续精修继续处理。'],
+      [35,500,11,'p','锁下身求解双臂','保存 arms 轨迹','pelvis_priority.py::solve_protected'],
+      [36,500,12,'d','得到落地参考','混合 → 37，全片落地 → 47','full_chain_initial.py::FullClipInitial.__call__','若 29 未触发全片避碰，采用 28 得到的落地轨迹。触发时采用 35 的结果。']
+    ],
+    edges:[[24,25],[25,26],[26,27],[27,28],[28,29],[29,30,'触发'],[29,36,'直接采用落地解',930],[30,31],[31,32],[32,33,'有'],[32,35,'无'],[33,34],[34,35,'通过则采用，否则保留腿解'],[35,36]]
+  },
+  {
+    key:'joins', name:'向外扩段、接缝复检与初解落盘', range:'37–48',
+    note:'37–46 只服务混合初解。腾空帧是落地段扩张边界。',
+    nodes:[
+      [37,500,0,'p','提取落地区间','读取两套全长参考和原始标记','contact_routed_initial.py::ContactRoutedInitial.__call__'],
+      [38,500,1,'p','两端各扩约 12 帧','扩张遇腾空帧即停止，合并相邻或重叠区间','contact_routed_initial.py::expanded_sections','一般公式为 max(3, round(0.25×fps))。'],
+      [39,500,2,'p','按区间直接选姿态','区间内取落地解，区间外取接触式解','contact_routed_initial.py::choose_rows','每一帧整行选用。双分支共用已准备的骨盆朝向轨迹。只在接缝直切不通过时尝试 43 的约束联解。'],
+      [40,500,3,'q','每处直接接缝可用？','关节限位、速度、根位置、碰撞、穿地、接触滑移','contact_routed_initial.py::SectionJoins.check_direct','用导出精度复检，逐对逐采样比较自碰撞及穿地，采样为帧间八等分。几何、根步长及接触允许值会参考两套方案中较宽的一侧和对应阈值。'],
+      [41,825,4,'p','只向外扫描切换点','每侧最多一个扩张宽度，遇腾空帧即停止','contact_routed_initial.py::SectionJoins.assemble'],
+      [42,825,5,'q','找到合格点或遇到相邻段？','到动作边缘也可结束该侧接缝','contact_routed_initial.py::SectionJoins.assemble'],
+      [43,500,6,'p','在落地区间内联解边界','固定窗口两端各两帧和保护帧','contact_routed_initial.py::SectionJoins.fit','仅在向外搜索无合格切换点且无可合并区间时尝试。保住区间外接触式初解姿态，窗口内按最小改动联解。'],
+      [44,500,7,'q','边界联解通过？','复检整段联解窗口','contact_routed_initial.py::SectionJoins.check'],
+      [45,825,8,'p','再向外增长并复检','到达腾空边界且联解仍无法通过时报告失败','contact_routed_initial.py::SectionJoins.assemble','搜索找到可用切换点或可合并边界时按该边界增长。下一轮按新区间重新选用和检查。'],
+      [46,500,9,'p','确认最终初解区间','保留全部原标记，区间外保持接触式初解','contact_routed_initial.py::ContactRoutedInitial.__call__','各接缝均通过且本轮无待扩张后，记录最终区间和历次接缝尝试。'],
+      [47,500,10,'p','落盘初解和诊断','有实测场景则先拟合平台支撑','v8/convert.py::convert','保存初解快照 motion.initial.npz、可播放轨迹、接触诊断和指纹。全片接触式或全片落地解 也汇合到此。'],
+      [48,500,11,'q','是否只跑初解？','是 → 封存初解，否 → 49','v8/convert.py::convert','分段批处理也可在这里生成检查点，再由独立精修进程从 49 继续。']
+    ],
+    edges:[[37,38],[38,39],[39,40],[40,41,'未通过的接缝'],[40,46,'本轮全部通过',55],[41,42],[42,43,'未找到'],[42,45,'可移动或合并'],[43,44],[44,45,'未通过'],[44,46,'通过'],[45,39,'重新选段',985,true],[46,47],[47,48]]
+  },
+  {
+    key:'repair', name:'精修预算、专项和 V8 段', range:'49–67',
+    note:'fast 和 refine 默认用 A 基线，按专项顺序轮转。B、C 为显式选择的测试线。B 前置落地后交替派发专项与 V8，C 按支撑相位联解，专项停滞或缺少可执行任务时可尝试 V8。',
+    nodes:[
+      [49,500,0,'p','审查已落盘的底稿','建立诊断缓存，保存或恢复固定参考','refine_pipeline.py::repair_output','核验全片轨迹、诊断、源目标，并保存 frax_baseline。精修比较使用当前已采用的结果和固定参考。续跑恢复检查点状态。'],
+      [50,500,1,'p','启动精修总预算','默认整条输入换算到 50 Hz 的总帧数 × 0.5 秒','refine_pipeline.py::normalized_input_frames','按原始整条动作的时长换算，裁剪、丢弃异常帧和后续补帧不参与预算计算。可用 --repair-budget 指定秒数。传 unlimited 可取消优先落地、专项、V8、时序共用的截止时间，单次时限和整次转换的 --budget 仍生效。'],
+      [51,500,2,'p','如有前置补帧，先查补帧接缝','定位并修复由补帧引入的突变','inserted_frame_repair.py::recover','有已准备时间映射且还有几何时间时尝试。通过采用检查才更新底稿。'],
+      [52,500,3,'p','筛选优先落地窗口','人体和机器人同段穿地，且有标注支撑','ground_settle.py::episodes','排除保护帧。按待办顺序逐个尝试，单窗上限 20 秒，并受共享截止时间限制。'],
+      [53,500,4,'p','优先落地候选','先竖直抬升回落，再按需联解并平滑','ground_settle.py::settled_seed','单窗口沿用专项上限。检查支撑锚点、穿地、接缝和碰撞。只有通过才替换该窗口的当前轨迹。'],
+      [54,500,5,'p','生成精修待办','A 建专项队列，B、C 也规划 V8 段','refine_pipeline.py::repair_output.jobs','A 将腿部避碰、脚锚支撑、帧间净空、去抖、身体支撑和手臂避碰按尝试次数轮转。B、C 还按连续残余和接触状态选择 V8 段。'],
+      [55,500,6,'q','共享时限内还有可派发任务？','A 轮转专项，B、C 调度专项和 V8','refine_pipeline.py::repair_output','A 继续派发专项，包括局部去抖。B、C 可从无专项的窗口转到 V8。预算耗尽或可执行任务用尽时转 67。'],
+      [56,175,7,'p','尝试一个专项候选','求解上限 20 秒，取剩余预算缩短','refine_pipeline.py::repair_output.run_specialist_trial','专项按依赖和当前残余选窗口及配方。候选保存保护帧；临时结果按导出精度复检。提早返回所剩的时间继续在共享时钟内可用。'],
+      [57,175,8,'q','专项是否合格并改善？','保护支撑和关键指标，目标残余必须改善','refine_pipeline.py::guard','接受时落盘并更新当前底稿和待办。拒收或超时记录尝试，保持最近一次已采用结果。验证和提交的实耗也记录在共享阶段。'],
+      [58,500,9,'q','还有时间并有 V8 段？','用专项之后的最新残余选段','segment_planner.py::next_segment'],
+      [59,825,10,'p','V8 连续段求解','求解前固定保护帧和段端点，单次上限 50 秒','v8/solver.py::WindowAnchors','截至 min(共享截止, 本次开始+50 秒)。全身姿态求解和支撑修正共用固定帧。可动帧的关节速度同时受前一帧和下一固定姿态约束。骨盆 XY 和根朝向沿用原值。'],
+      [60,825,11,'p','V8 段边缘权重过渡','sin² 权重及速度投影只作用于可动帧','segment_refine.py::project_joints','此节点是 V8 局部换解的边缘混合。Frax 两套初解在 39 逐帧整行选用。V8 段端点和高度保护帧全程锁定。'],
+      [61,825,12,'q','V8 初检通过？','先审查候选并挡掉明显的质量退化','segment_refine.py::refine.audit'],
+      [62,825,13,'p','可选一个段内专项插件','受该 V8 段剩余时限和 20 秒共同约束','segment_refine.py::refine.post_job','从候选的段内残余挑一个适用插件。插件只有自行通过保护检查并带来改善才并入，否则复核原 V8 候选。'],
+      [63,825,14,'q','V8 段是否可采用？','整段和接缝复检；关键指标无退化，目标残余下降','segment_refine.py::segment_guard'],
+      [64,500,15,'p','采用并更新两套待办','落盘当前轨迹、刷新诊断，写检查点','segment_refine.py::publish_trial'],
+      [65,175,15,'p','拒收或记超时','保留当前轨迹，记录原因和待办','segment_refine.py::refine'],
+      [66,500,16,'p','记录本轮调度并继续','回到 55，用最新底稿与剩余时间决定','segment_refine.py::refine','收到的 20/50 秒是每次求解上限。已开始的审查与提交仍会结束，预算用完后停止继续派发。'],
+      [67,500,17,'d','精修派发结束','A → 74 独立终验，B、C → 68 时序收尾','refine_pipeline.py::repair_output','读取最后一次已采用的轨迹。A 的去抖已在专项队列内执行。B、C 写专项与 V8 日志，并以剩余时间尝试时序候选。']
+    ],
+    edges:[[49,50],[50,51],[51,52,'B、C'],[51,54,'A 默认',850],[52,53],[53,54],[54,55],[55,56,'有专项'],[55,58,'B、C 暂无专项'],
+           [55,67,'到共享截止／可执行任务用尽',44],[56,57],[57,55,'A 继续轮转',325,true],[57,58,'B、C 更新底稿'],
+           [58,59,'有'],[58,66,'无 V8，继续专项',670],[58,67,'退出几何段',991],
+           [59,60],[60,61],[61,62,'通过'],[61,65,'未通过',41],[62,63],[63,64,'通过'],[63,65,'拒收或超时'],
+           [64,66],[65,66],[66,55,'重新调度',985,true]]
+  },
+  {
+    key:'finish', name:'时序收尾、独立终验和导出', range:'68–86',
+    note:'时序收尾使用最后一次几何换解后的剩余时间。refine 可在终验后尝试限速插帧，并重新独立复检。',
+    nodes:[
+      [68,500,0,'q','有时序问题和剩余时间？','读取抖动、根部异常和可修的帧间浅穿地','refine_pipeline.py::repair_output.run_temporal'],
+      [69,500,1,'p','修孤立关节脉冲','使用固定两端的 Hermite 候选','temporal_repair.py::Repair.jitter'],
+      [70,500,2,'p','按需联解残余抖动窗','同时保护接触、净空和相邻速度','sparse_jitter.py::finish'],
+      [71,500,3,'p','按标记修根角度或浅穿地','仅在相应问题和可用时限满足时尝试','refine_pipeline.py::repair_output.run_temporal'],
+      [72,500,4,'q','时序候选通过？','复查保护帧、几何和根部突变','refine_pipeline.py::repair_output.run_temporal.commit_temporal','合格才采用，否则保留当前轨迹。根部突变的后续专项同样使用此提交检查。'],
+      [73,500,5,'p','按需修根部和接触切换突变','使用本轮剩余时序时间，候选复检后才采用','discontinuities.py::Discontinuities'],
+      [74,500,6,'p','独立审查落盘整片轨迹','全身净空、自碰撞、锚点、支撑、速度与适配质量','refine_pipeline.py::repair_output','从落盘文件重新计算指标，包括原帧和帧间几何。独立结果与前面的增量结果比较。'],
+      [75,500,7,'q','独立审查与增量结果一致？','一致才继续导出判断','refine_pipeline.py::repair_output'],
+      [76,500,8,'q','允许放慢且关节超过额定速度？','有剩余精修预算且源审查允许时插帧','retiming.py::final_candidate'],
+      [77,175,8,'d','结束此轮并保留失败报告','审查不一致时中止导出','cli.py::convert'],
+      [78,825,9,'p','只在超速区间插帧','保留原姿态，骨盆 XY 插值，IK 调整 Z 和关节','retiming.py::fit_inserted_frames','按现有时间网格保留全部原始样本。以插帧方式延长局部动作，50 Hz 输出，更新源帧映射。'],
+      [79,825,10,'p','按需尝试回退候选','再试固定两端修补或沿原帧路径线性插值','retiming.py::final_candidate'],
+      [80,825,11,'q','新时间网格全片复检通过？','速度合格，几何、接触与根部指标无新增退化','retiming.py::inserted_geometry_regression','候选用相同插值位置做几何对照，独立审查不得新增质量标记。采用时归档补帧前快照 pre_final_retime。'],
+      [81,500,12,'p','确定最终播放轨迹','记录采用／拒收和运行质量报告','cli.py::convert','如果补帧通过则使用补帧后轨迹；其他情况保留原时间网格上最近一次已采用的轨迹。motion.npz 与最终可播放结果对应。'],
+      [82,500,13,'q','按模式及质量标记输出','fast 保留预览，refine 按终验决定','acceptance.py::disposition'],
+      [83,175,14,'d','Accepted → 导出 training.npz','从最终轨迹另存训练格式并回读校验','acceptance.py::export_training','motion.npz 继续作为可播放结果。training.npz 另存 root 和 29 轴数据，四元数转 wxyz，保存来源和模型指纹。'],
+      [84,500,14,'d','输出预览','fast；或 refine 仅有姿态相似度备注','cli.py::convert'],
+      [85,825,14,'d','Review → 保留结果和待办','存在其他质量标记，例如碰撞、穿地或超速','acceptance.py::evaluate'],
+      [86,500,15,'d','完成并记录最终路径','运行及阶段报告；已验收的训练文件进入索引','cli.py::convert']
+    ],
+    edges:[[68,69,'有'],[68,74,'跳过时序',57],[69,70],[70,71],[71,72],[72,73,'采用或保留现值'],[73,74],
+           [74,75],[75,76,'一致'],[75,77,'不一致'],[76,78,'是'],[76,81,'关闭／未超速／区间不可插帧'],[78,79],[79,80],[80,81,'通过则采用，否则保留'],
+           [81,82],[82,83,'清零'],[82,84,'fast 或仅姿态备注'],[82,85,'其他标记'],[83,86],[84,86],[85,86]]
+  }
+];
+
+const svgNS = 'http://www.w3.org/2000/svg';
+const width = 1000, nodeWidth = 301, nodeHeight = 78, rowGap = 107;
+const kindNames = {p:'处理', q:'判断', d:'产物或流转'};
+const xHalf = nodeWidth / 2;
+const formatId = id => String(id).padStart(2, '0');
+const info = document.querySelector('#detail');
+const heading = document.querySelector('#detail-heading');
+const details = document.querySelector('#detail-text');
+const source = document.querySelector('#detail-source');
+const copy = document.querySelector('[data-copy]');
+const labels = new Map();
+const context = document.createElement('canvas').getContext('2d');
+context.font = '12.5px system-ui, PingFang SC, Microsoft YaHei, sans-serif';
+let current = null;
+
+function svgEl(name, attributes, value) {
+  const el = document.createElementNS(svgNS, name);
+  for (const [key, attr] of Object.entries(attributes)) el.setAttribute(key, attr);
+  if (value) el.textContent = value;
+  return el;
+}
+
+function splitLine(text) {
+  const lines = [];
+  let line = '';
+  for (const char of text) {
+    if (context.measureText(line + char).width > nodeWidth - 26 && line) {
+      lines.push(line);
+      line = '';
+    }
+    line += char;
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+function routeEdge(from, to, rail) {
+  if (rail != null) {
+    const direction = rail < from.x ? -1 : 1;
+    const targetSide = rail < to.x ? -1 : 1;
+    return [[from.x + direction*xHalf, from.y + nodeHeight/2],
+            [rail, from.y + nodeHeight/2],
+            [rail, to.y + nodeHeight/2],
+            [to.x + targetSide*xHalf, to.y + nodeHeight/2]];
+  }
+  if (from.y === to.y) {
+    const direction = Math.sign(to.x-from.x);
+    const y = from.y + nodeHeight/2;
+    return [[from.x + direction*xHalf,y],[to.x-direction*xHalf,y]];
+  }
+  if (from.x === to.x) {
+    return [[from.x,from.y+nodeHeight],[to.x,to.y]];
+  }
+  const mid = (from.y + nodeHeight + to.y)/2;
+  return [[from.x,from.y + nodeHeight],[from.x,mid],[to.x,mid],[to.x,to.y]];
+}
+
+function drawEdge(svg, positions, edge, marker) {
+  const [start, end, label, rail, loop] = edge;
+  const from = positions.get(start), to = positions.get(end);
+  const coords = routeEdge(from, to, rail);
+  const line = svgEl('polyline', {points:coords.map(pair => pair.join(',')).join(' '), class:loop?'edge loop':'edge',
+                                  'marker-end':'url(#'+marker+')'});
+  svg.append(line);
+  if (!label) return;
+  let at, align;
+  if (rail != null) {
+    const left = rail < width/2;
+    at = [rail + (left ? 8 : -8), (from.y + to.y)/2 + nodeHeight/2];
+    align = left ? 'start' : 'end';
+  } else if (coords[0][0] === coords[coords.length-1][0]) {
+    at = [from.x+8,(from.y+nodeHeight+to.y)/2+4];
+    align = 'start';
+  } else {
+    const left = coords.length === 4 ? coords[1] : coords[0];
+    const right = coords.length === 4 ? coords[2] : coords[1];
+    at = [(left[0]+right[0])/2,left[1]-5];
+    align = 'middle';
+  }
+  svg.append(svgEl('text',{x:at[0],y:at[1],class:'edge-label','text-anchor':align},label));
+}
+
+function drawNode(svg, item, pos) {
+  const [id,,,kind,title,desc,ref,note] = item;
+  const number = formatId(id);
+  const node = svgEl('g',{class:'node '+(kind==='q'?'decision':kind==='d'?'done':'process'),id:'step-'+number,
+    role:'button',tabindex:0,'aria-label':number+' '+kindNames[kind]+' '+title});
+  const x = pos.x - xHalf, y = pos.y;
+  node.append(svgEl('rect',{x,y,width:nodeWidth,height:nodeHeight,rx:10,class:'box'}));
+  node.append(svgEl('rect',{x:x+12,y:y+12,width:33,height:22,rx:5,class:'badge'}));
+  node.append(svgEl('text',{x:x+28.5,y:y+27.4,class:'code','text-anchor':'middle'},number));
+  node.append(svgEl('text',{x:x+55,y:y+27,class:'label'},title));
+  splitLine(desc).forEach((line,i) => node.append(svgEl('text',{x:x+12,y:y+51+i*16,class:'desc'},line)));
+  node.append(svgEl('title',{},number+' '+title+' · '+desc));
+  node.addEventListener('click', () => showStep(number));
+  node.addEventListener('keydown', event => {
+    if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); showStep(number); }
+  });
+  labels.set(number,{node,title,desc,ref,note});
+  svg.append(node);
+}
+
+function buildGroup(group) {
+  const link = document.createElement('a');
+  link.href = '#'+group.key;
+  link.textContent = group.range+' '+group.name;
+  document.querySelector('#contents').append(link);
+
+  const section = document.createElement('section');
+  section.className = 'panel';
+  section.id = group.key;
+  const head = document.createElement('header'), title = document.createElement('h2'), hint = document.createElement('p');
+  title.textContent = group.range+' '+group.name;
+  hint.textContent = group.note;
+  head.append(title,hint);
+  section.append(head);
+  const chart = document.createElement('div');
+  chart.className = 'chart';
+  const height = Math.max(...group.nodes.map(item => item[2]))*rowGap+nodeHeight+32;
+  const svg = svgEl('svg',{viewBox:'0 0 '+width+' '+height,width,height,role:'group','aria-label':group.name});
+  const marker = 'arrow-'+group.key;
+  const defs = svgEl('defs',{}), arrow = svgEl('marker',{id:marker,viewBox:'0 0 8 8',refX:7,refY:4,
+    markerWidth:7,markerHeight:7,orient:'auto-start-reverse'});
+  arrow.append(svgEl('path',{d:'M0 0 L8 4 L0 8 Z',fill:'#5e7783'}));
+  defs.append(arrow);
+  svg.append(defs);
+  const positions = new Map(group.nodes.map(([id,x,row]) => [id,{x,y:16+row*rowGap}]));
+  for (const edge of group.edges) drawEdge(svg,positions,edge,marker);
+  for (const item of group.nodes) drawNode(svg,item,positions.get(item[0]));
+  chart.append(svg);
+  section.append(chart);
+  document.querySelector('#panels').append(section);
+}
+
+function showStep(number) {
+  const item = labels.get(number);
+  if (!item) return;
+  if (current) labels.get(current).node.classList.remove('selected');
+  current = number;
+  item.node.classList.add('selected');
+  heading.textContent = number+' '+item.title;
+  details.textContent = item.note || item.desc;
+  const [file,symbol] = item.ref.split('::');
+  source.href = '../src/dex_frax/'+file;
+  source.title = '在源码中查找 '+symbol;
+  source.textContent = file+' · '+symbol;
+  copy.textContent = '复制编号 '+number;
+  info.showModal();
+}
+
+copy.addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText(current);
+    copy.textContent = '已复制 '+current;
+  } catch {
+    const field = document.createElement('textarea');
+    field.value = current;
+    info.append(field);
+    field.select();
+    if (document.execCommand('copy')) copy.textContent = '已复制 '+current;
+    field.remove();
+  }
+});
+for (const group of groups) buildGroup(group);
+</script>
+</body>
+</html>

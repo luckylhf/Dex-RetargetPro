@@ -1,0 +1,146 @@
+"""Optional SMPL-X entry: separate geometry environment, existing solver modes."""
+import argparse
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+from .contract import DEFAULT_FOOT_CONTACT
+
+
+def _input_command(python, arguments):
+    # Load only our Python source from the solver installation. Adding its
+    # parent to PYTHONPATH also exposes platform-specific solver dependencies.
+    bootstrap = """
+import importlib.util
+from pathlib import Path
+import runpy
+import sys
+
+package_path = Path(sys.argv.pop(1))
+spec = importlib.util.spec_from_file_location(
+    'dex_frax', package_path / '__init__.py',
+    submodule_search_locations=[str(package_path)],
+)
+package = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = package
+spec.loader.exec_module(package)
+runpy.run_module('dex_frax.smplx_input', run_name='__main__', alter_sys=True)
+"""
+    return [str(python), '-I', '-c', bootstrap, str(Path(__file__).resolve().parent), *arguments]
+
+
+def add_options(parser):
+    parser.add_argument('--body-models',type=Path,default=os.environ.get('SMPLX_MODEL_DIR'))
+    parser.add_argument('--smplx-python',default=os.environ.get('SMPLX_PYTHON',sys.executable),
+                        help='Python with torch/smplx/numpy/scipy; can differ from the solver environment')
+    parser.add_argument('--input-fps',type=float,help='Required when the human input has no fps metadata')
+    parser.add_argument('--up-axis',choices=['y','z'],help='Required for generic inputs without up_axis metadata')
+    parser.add_argument('--units',choices=['m'],help='Explicitly confirm translation units when metadata is absent')
+    parser.add_argument('--grounding',choices=['off','contact'],default='off')
+
+
+def prepare(args, directory, timeout=None):
+    from .input_errors import MotionInputError
+    from .cli import sha
+    if getattr(args,'continue_from',None) is not None and getattr(args,'smplx_prepared',None) is None:
+        from .refine_resume import locate
+        previous=locate(args.continue_from)
+        cached=next((p for p in (previous/'input/human.npz',previous.parent/'input/human.npz') if p.exists()),None)
+        if cached is None:raise MotionInputError('Continuation SMPL-X prepared geometry missing')
+        args.smplx_prepared=str(cached);args.smplx_prepared_sha256=sha(cached)
+    prepared = getattr(args,'smplx_prepared',None)
+    if prepared is not None:
+        if sha(prepared)!=args.smplx_prepared_sha256:
+            raise MotionInputError('Prepared SMPL-X input changed')
+        # Each continuation is self-contained for the next hop. Preserve the
+        # exact prepared bytes and therefore the calibration/identity contract.
+        import shutil
+        dest=Path(directory)/'input'/'human.npz';dest.parent.mkdir(parents=True,exist_ok=True)
+        if Path(prepared).resolve()!=dest.resolve():shutil.copyfile(prepared,dest)
+        if sha(dest)!=args.smplx_prepared_sha256:raise MotionInputError('Copied SMPL-X geometry differs')
+        args.smplx_prepared=str(dest)
+        return dest
+    if not getattr(args,'body_models',None):
+        raise MotionInputError('SMPL-X requires --body-models (parent of smplx/SMPLX_GENDER.npz)')
+    dest = Path(directory)/'input'/'human.npz'
+    cmd = [str(args.input),
+           '--output',str(dest),'--body-models',str(args.body_models),'--grounding',args.grounding]
+    if getattr(args, 'foot_contact', DEFAULT_FOOT_CONTACT) == 'v2':
+        cmd.append('--sole-corners')
+    cmd.append('--source-audit')
+    if getattr(args, 'ground_running', False):
+        cmd.append('--ground-running')
+    for attr in ('input_fps','up_axis','units','max_frames'):
+        value=getattr(args,attr,None)
+        if value is not None: cmd.extend(['--'+attr.replace('_','-'),str(value)])
+    try:
+        subprocess.run(_input_command(args.smplx_python,cmd),check=True,timeout=timeout)
+    except subprocess.CalledProcessError as exc:
+        raise MotionInputError('SMPL-X input preparation failed; see the field-specific error above') from exc
+    args.smplx_prepared=str(dest);args.smplx_prepared_sha256=sha(dest)
+    return dest
+
+
+def preparation_identity(args):
+    import numpy as np
+    with np.load(args.smplx_prepared,allow_pickle=False) as data:
+        meta=json.loads(str(data['metadata_json']))
+    from .cli import sha
+    if meta['input_sha256']!=sha(args.input):
+        raise ValueError('SMPL-X source changed after preparation')
+    return dict(prepared_sha256=sha(args.smplx_prepared),parameters=meta)
+
+
+def check_input(args):
+    cmd=[str(args.input),'--grounding',args.grounding]
+    for attr in ('input_fps','up_axis','units'):
+        value=getattr(args,attr,None)
+        if value is not None:cmd.extend(['--'+attr.replace('_','-'),str(value)])
+    return subprocess.run(_input_command(args.smplx_python,cmd)).returncode
+
+
+def single_auto(args,worker_factory=None):
+    """Reuse the geometry once; bound owned solver workers with the same budget."""
+    from .cli import atomic_json,sha
+    from .cascade import Worker,accepted_artifact
+    from .dispatch import pipeline_stages,use_unified
+    out=Path(args.output).resolve();out.mkdir(parents=True,exist_ok=False)
+    started=time.monotonic();attempts=[];selected=None;status='running';preview=None
+    atomic_json(out/'run.json',dict(status=status,mode='auto',source='smplx'))
+    worker=None
+    try:
+        prepare(args,out,timeout=args.budget)
+        worker=(worker_factory or Worker)()
+        for mode in pipeline_stages(args):
+            remaining=args.budget-(time.monotonic()-started)
+            if remaining<=0: status='budget_exhausted';break
+            stage=out/mode
+            options=vars(args).copy();options.update(output=str(stage),input=str(Path(args.input).resolve()),mode=mode)
+            options.update(reuse_initial_from=None,require_initial_reuse=False,legacy_frax=getattr(args,'profile',None) in ('fast','refine'),unified_repair=use_unified(args))
+            result=worker.run(dict(input=str(args.input),input_sha256=sha(args.input),log=str(out/(mode+'.log')),arguments=options),remaining)
+            attempts.append(dict(mode=mode,**result))
+            artifact=accepted_artifact(stage,result)
+            if artifact:
+                selected=mode;status='accepted';preview=mode;break
+            if result['status']=='complete': preview=mode
+            if result['status']=='input_error': status='input_error';break
+            if result['status']=='timeout': status='budget_exhausted';break
+        if status=='running':
+            status=next((a['quality'] for a in reversed(attempts) if a.get('status')=='complete'), 'failed')
+    except BaseException as exc:
+        atomic_json(out/'run.json',dict(status='failed',error=repr(exc),mode='auto',source='smplx'))
+        raise
+    finally:
+        if worker is not None: worker.close()
+    record=dict(status=status,pipeline=getattr(args,'pipeline','unified'),selected_mode=selected,selected_output=selected,
+                preview_output=preview,training_npz=f'{selected}/training.npz' if selected else None,attempts=attempts)
+    atomic_json(out/'selection.json',record)
+    atomic_json(out/'accepted.json',dict(motions=[] if not selected else [dict(id='motion',training_npz=record['training_npz'],
+                sha256=sha(out/record['training_npz']))]))
+    atomic_json(out/'run.json',dict(status='complete' if status in ('accepted','review','accepted_with_notes') else status,quality=status,mode='auto',
+                selected_output=selected,preview_output=preview,training_npz=record['training_npz'],total_wall_s=time.monotonic()-started))
+    print(json.dumps(record,ensure_ascii=False,indent=2))
+    return record
