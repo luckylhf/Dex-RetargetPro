@@ -34,26 +34,28 @@ def _remember(cache, key, value, capacity):
 
 
 def initial_branch_count(t):
-    mask=np.asarray(t.get('priority_mask',np.zeros(32,bool)))
+    mask=np.asarray(t.get('priority_mask',np.zeros(target_profile.POSE_SIZE,bool)))
     # Three seeds differ only at shoulder-yaw/elbow-yaw. When all upper joints
     # are protected, they are projected to the identical state before stepping.
-    return 1 if np.all(mask[18:]) else 3
+    arm_end = target_profile.POSE_SIZE - len(target_profile.HEAD_JOINTS)
+    arm_start = arm_end - 2 * len(target_profile.ARM_AXES)
+    return 1 if np.all(mask[..., arm_start:arm_end]) else 3
 
 
 def solve_columns(robot,t):
     mask=np.asarray(t.get('priority_mask',[]),bool)
-    if t.get('landing') and mask.shape == (32,) and np.array_equal(np.flatnonzero(mask), [0, 1]):
+    if t.get('landing') and mask.shape == (target_profile.POSE_SIZE,) and np.array_equal(np.flatnonzero(mask), [0, 1]):
         return np.flatnonzero(~mask)
     arms=np.asarray(sum([g['arm'] for g in robot.sides.values()],[]),int)
     if (t.get('arm_self_collision',False) and not t.get('foot_self_collision',False)
-            and mask.shape==(32,) and np.array_equal(np.flatnonzero(~mask),arms)):
+            and mask.shape==(target_profile.POSE_SIZE,) and np.array_equal(np.flatnonzero(~mask),arms)):
         return arms
     legs=np.asarray(sum([g['leg'] for g in robot.sides.values()],[]),int)
     if (t.get('foot_self_collision',False) and not t.get('arm_self_collision',False)
-            and mask.shape==(32,)):
+            and mask.shape==(target_profile.POSE_SIZE,)):
         free=np.flatnonzero(~mask)
         if np.array_equal(free,legs) or np.array_equal(free,np.r_[2,legs]):return free
-    return np.arange(32)
+    return np.arange(target_profile.POSE_SIZE)
 
 
 @jax.tree_util.register_static
@@ -84,8 +86,8 @@ class FrameBounds(InequalityConstraint):
     def __init__(self, robot, lower, upper, step, gain, previous_columns=None, local_columns=None):
         self.robot, self.gain = robot, gain
         self.lower, self.upper, self.step = map(np.asarray, (lower, upper, step))
-        self.previous_columns=np.arange(3,32) if previous_columns is None else np.asarray(previous_columns,int)
-        self.local_columns=(np.arange(3,32) if previous_columns is None else np.arange(len(self.previous_columns))) if local_columns is None else np.asarray(local_columns,int)
+        self.previous_columns=np.arange(3,target_profile.POSE_SIZE) if previous_columns is None else np.asarray(previous_columns,int)
+        self.local_columns=(np.arange(3,target_profile.POSE_SIZE) if previous_columns is None else np.arange(len(self.previous_columns))) if local_columns is None else np.asarray(local_columns,int)
         self.G = np.vstack([np.eye(robot.nv)[self.local_columns], -np.eye(robot.nv)[self.local_columns]])
         self.num_rows, self.penalty = 2*len(self.local_columns), 1e8
 
@@ -107,10 +109,13 @@ class FrameBounds(InequalityConstraint):
 
 
 def targets(t, robot=None):
+    from .v8.source import head_relative_target
+
     keys = ("thigh", "shin", "foot_target_p", "foot_target_r", "contact", "pivots", "anchors",
             "upper", "lower", "hand_forward", "hand_width", "forearm_width", "elbow_axis",
             "signed_elbow_bend", "ground_contact_confidence")
     out = {k: np.asarray(t[k]) for k in ("root_p", "root_r", "torso_r")}
+    out['head_relative_r'] = head_relative_target(out['torso_r'], t.get('head_r', out['torso_r']))
     out['body_tolerance'] = np.full(len(t['hips']),float(t['body_contact_height_tolerance_m']))
     if 'priority_pose' in t:
         out['priority_pose']=np.asarray(t['priority_pose'])
@@ -163,6 +168,8 @@ def make_residual(model, robot, t, w):
         add(x[:3] - ref["root_p"], w["root_position"])
         for ax in (0, 2):
             axis(robot.torso, np.eye(3)[ax], ref["torso_r"][:, ax], w["torso_orientation"])
+        head_relative = r[robot.torso].T @ r[robot.head]
+        add(head_relative[:, :2] - ref['head_relative_r'][:, :2], w['head_orientation'])
         for side, g in robot.sides.items():
             v = ref["sides"][side]
             direction(g["hip"], g["knee"], v["thigh"], w["leg_direction"])
@@ -319,7 +326,7 @@ class FraxIK:
         self.report["fk_parity"] = {**parity, 'reused_verified_model': bool(model_hit)}
         refs = targets(t, robot)
         n, fps = len(t["hips"]), float(t["fps"])
-        x0 = np.r_[t["root_p"][0], np.zeros(29)]
+        x0 = np.r_[t["root_p"][0], np.zeros(target_profile.JOINT_COUNT)]
         for g in robot.sides.values():
             x0[g["arm"][3]], x0[g["leg"][3]] = -.4, .15
         if 'priority_pose' in t:x0=np.asarray(t['priority_pose'][0]).copy()
@@ -375,7 +382,7 @@ class FraxIK:
         return np.asarray(x),np.asarray(records).tolist()
 
     def _compile(self,model,robot,t,cfg,refs,x0,fps):
-        ids=solve_columns(robot,t);reduced=len(ids)!=32
+        ids=solve_columns(robot,t);reduced=len(ids)!=target_profile.POSE_SIZE
         space=HingeSpace(len(ids)) if reduced else model
         def lift(q,ref):return ref['priority_pose'].at[ids].set(q) if reduced else q
         def project(q):return q[ids] if reduced else q

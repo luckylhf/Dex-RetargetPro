@@ -61,6 +61,8 @@ def evaluate(pkl, meta, solve, mode, cache=None, changed=None):
     payload = pickle.loads(pkl.read_bytes())
     result['continuity'] = continuity(payload['dof_pos'], 50.)
     result['continuity']['hardware_acceleration_limits_available'] = False
+    result['head_tracking'] = dict(calibration=meta.get('head_calibration'),
+                                  orientation_error_deg=check.get('head_orientation_deg'))
     result['knees'] = {name: dict(min_deg=float(np.rad2deg(payload['dof_pos'][:, j]).min()),
                                  negative_frames=int(np.sum(payload['dof_pos'][:, j] < 0.)))
                        for j, name in enumerate(payload['joint_names']) if 'knee' in name}

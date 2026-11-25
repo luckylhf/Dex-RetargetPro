@@ -81,7 +81,7 @@ def prepare(t,robot,cfg,enabled=True):
     n=len(t['hips']);fps=t['fps'];p=t['p'];scale=t['scale'];origin=t['world_origin']
     # Geometry was cached at Robot's neutral configuration. Reconstruct it now
     # before calculating source proxies, independent of the current frame.
-    robot.set(np.r_[0.,0.,1.,np.zeros(29)],np.eye(3))
+    robot.set(np.r_[0.,0.,1.,np.zeros(profile.JOINT_COUNT)],np.eye(3))
     shape=robot.surface_models;models=[]
     source_surface=None
     if t['source_type'] in ('lafan','soma'):
@@ -126,7 +126,7 @@ def prepare(t,robot,cfg,enabled=True):
     center=center+np.einsum('nij,j->ni',t['torso_r'],offset/scale)
     add('torso',robot.torso,center,t['torso_r'],torso_origin,robot.rot(robot.torso))
     head=robot.bid(profile.HEAD_BODY)
-    if 'Head' in p:add('head',head,p['Head'],t['torso_r'],robot.point(head),robot.rot(head))
+    if 'Head' in p:add('head',head,p['Head'],t.get('head_r',t['torso_r']),robot.point(head),robot.rot(head))
 
     tcp_basis=frame_xz(np.asarray(profile.TCP_WIDTH),-np.asarray(profile.TCP_FORWARD))
     for side,g in robot.sides.items():

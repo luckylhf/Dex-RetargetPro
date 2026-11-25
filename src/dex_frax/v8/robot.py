@@ -17,12 +17,16 @@ class Robot:
         self.path=str(Path(path).resolve());self.m=load(self.path);self.d=mujoco.MjData(self.m)
         m=self.m
         self.jids=np.array([i for i in range(m.njnt) if m.jnt_type[i]==mujoco.mjtJoint.mjJNT_HINGE])
-        if len(self.jids)!=29 or m.nq!=36: raise ValueError('Expected Dex 29 revolute joints plus free pelvis')
+        if (len(self.jids), m.nq, m.nv, m.nu) != (
+                profile.JOINT_COUNT, profile.JOINT_COUNT + 7, profile.JOINT_COUNT + 6, profile.JOINT_COUNT):
+            raise ValueError('Expected Dex 31 revolute joints and actuators plus free pelvis')
         hinges = {m.joint(int(i)).name: i for i in self.jids}
         self.names = list(profile.JOINT_ORDER)
         if set(self.names) != hinges.keys():
             raise ValueError('Robot profile joints differ from the MJCF hinge joints')
         self.jids = np.array([hinges[name] for name in self.names])
+        if set(m.actuator_trnid[:, 0]) != set(self.jids):
+            raise ValueError('Dex actuator joints differ from the named hinges')
         manifest = json.loads((ASSETS / profile.MODEL_MANIFEST).read_text())
         if self.names != manifest['joint_names']:
             raise ValueError('Robot profile order differs from the asset manifest')
@@ -33,8 +37,8 @@ class Robot:
         self.cols=np.r_[0,1,2,self.dadr]
         self._root_matrix=None;self._root_quat=None;self._fk_qpos=None;self._jac_cache={}
         self.cache_stats=dict(set_calls=0,fk_calls=0,jac_calls=0,jac_hits=0,rotation_conversions=0)
-        self.set(np.r_[0.,0.,1.,np.zeros(29)],np.eye(3))
-        self.sides={};self.torso=self.bid(profile.TORSO_BODY)
+        self.set(np.r_[0.,0.,1.,np.zeros(profile.JOINT_COUNT)],np.eye(3))
+        self.sides={};self.torso=self.bid(profile.TORSO_BODY);self.head=self.bid(profile.HEAD_BODY)
         for side,layout in profile.SIDE_LAYOUT.items():
             g={role:self.bid(name) for role,name in layout['bodies'].items()}
             for chain in ('arm', 'leg'):

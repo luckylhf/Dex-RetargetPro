@@ -1,3 +1,4 @@
+from dex_frax.robot_profile import JOINT_COUNT, POSE_SIZE
 import numpy as np
 from dex_frax.full_chain_initial import collision_trigger
 
@@ -17,7 +18,7 @@ def test_full_waist_keeps_support_feet_and_root_fixed_and_improves_torso():
     from dex_frax.pelvis_priority import waist_trajectory
     from dex_frax.full_chain_waist import constrained_waist
     r=Robot()
-    seed=np.tile(np.r_[0.,0.,.9,np.zeros(29)],(5,1))
+    seed=np.tile(np.r_[0.,0.,.9,np.zeros(JOINT_COUNT)],(5,1))
     target=seed.copy()
     j=3+r.names.index('waist_yaw_joint')
     target[:,j]=.12
@@ -28,7 +29,7 @@ def test_full_waist_keeps_support_feet_and_root_fixed_and_improves_torso():
     cfg={'numerical_joint_speed_deg_s':720.}
     fitted,ids=waist_trajectory(r,t,seed,cfg)
     out,stats=constrained_waist(r,t,seed,fitted,ids,cfg)
-    locked=np.ones(32,bool)
+    locked=np.ones(POSE_SIZE,bool)
     locked[ids]=False
     assert np.array_equal(out[:,locked],seed[:,locked])
     assert np.array_equal(out[2],seed[2])
@@ -42,7 +43,7 @@ def test_landing_lifts_each_episode_as_a_rigid_vertical_translation():
 
     robot = Robot()
     rotations = np.repeat(np.eye(3)[None], 12, axis=0)
-    raw = np.zeros((12, 32))
+    raw = np.zeros((12, POSE_SIZE))
     raw[:, 2] = .60
     raw[11, 2] = 1.20
     raw[:, 0] = np.linspace(0., .1, len(raw))
@@ -69,7 +70,7 @@ def test_landing_prescribes_the_mapped_source_xy_at_every_frame():
     from dex_frax.v8.robot import Robot
 
     robot = Robot()
-    raw = np.zeros((3, 32))
+    raw = np.zeros((3, POSE_SIZE))
     raw[:, 2] = .8
     source_root = np.array([[1., 2., .8], [1.01, 1.997, .8], [1.02, 1.991, .8]])
     targets = dict(
@@ -77,7 +78,7 @@ def test_landing_prescribes_the_mapped_source_xy_at_every_frame():
         sides={side: {'contact': np.zeros(len(raw))} for side in robot.sides}, body_contacts=[])
 
     def solver(robot, target, config, progress):
-        np.testing.assert_array_equal(solve_columns(robot, target), np.arange(2, 32))
+        np.testing.assert_array_equal(solve_columns(robot, target), np.arange(2, POSE_SIZE))
         np.testing.assert_array_equal(target['priority_pose'][:, :2], source_root[:, :2])
         return target['priority_pose'], []
 

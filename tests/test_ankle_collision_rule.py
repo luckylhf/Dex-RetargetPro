@@ -1,4 +1,5 @@
 """Real Dex geometry: bounded same-leg exclusion, retained other collisions."""
+from dex_frax.robot_profile import JOINT_COUNT
 import itertools
 
 import mujoco
@@ -17,7 +18,7 @@ def model():
 
 
 def pose():
-    return np.r_[0., 0., 1., np.zeros(29)]
+    return np.r_[0., 0., 1., np.zeros(JOINT_COUNT)]
 
 
 def ankle_columns(model, side):
@@ -123,3 +124,19 @@ def test_submodels_and_initial_foot_qp_apply_the_same_rule(model):
     assert excluded.any()
     np.testing.assert_array_equal(G[excluded], 0.)
     assert (h[excluded] > 0.).all()
+
+
+@pytest.mark.parametrize('sole_type', ['cylinder', 'capsule'])
+def test_offline_excludes_sole_primitives_but_keeps_other_colliders(sole_type):
+    from dex_frax.foot_collision import offline_collision_geoms
+    from dex_frax.robot_profile import SIDE_LAYOUT
+
+    feet = [layout['bodies']['foot'] for layout in SIDE_LAYOUT.values()]
+    model = mujoco.MjModel.from_xml_string(
+        '<mujoco><worldbody>' + ''.join(
+            f'<body name="{foot}"><geom name="{foot}_sole" type="{sole_type}" '
+            'size=".01 .02" group="1"/></body>' for foot in feet
+        ) + '<body name="shin"><geom name="shin_collision" type="capsule" '
+        'size=".01 .02" group="1"/></body></worldbody></mujoco>'
+    )
+    assert list(offline_collision_geoms(model)) == [model.geom('shin_collision').id]

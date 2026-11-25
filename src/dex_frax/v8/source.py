@@ -1,4 +1,5 @@
 """Source-specific anatomy, in a shared right-handed Z-up world frame."""
+from dataclasses import replace
 import json
 from pathlib import Path
 import numpy as np
@@ -7,6 +8,17 @@ from .source_profile import lafan_foot
 from .math3d import unit, frame_yz, frame_xz
 
 REFERENCE=Path(__file__).resolve().parent/'reference'
+
+def head_relative_target(torso, head):
+    """Keep the source forward direction on Dex's torso-relative Z-Y chain."""
+    relative = torso.transpose(0, 2, 1) @ head
+    forward = relative[:, :, 0]
+    horizontal = np.linalg.norm(forward[:, :2], axis=1)
+    yaw = np.where(horizontal > 1e-8, np.arctan2(forward[:, 1], forward[:, 0]),
+                   np.arctan2(-relative[:, 0, 1], relative[:, 1, 1]))
+    lateral = np.column_stack([-np.sin(yaw), np.cos(yaw), np.zeros(len(yaw))])
+    return frame_yz(lateral, np.cross(forward, lateral))
+
 
 def rest_forearm_width(motion,side):
     """Finger-base separation in the zero-rotation BVH forearm frame.
@@ -41,6 +53,22 @@ def adapt(motion, source='auto'):
     root=frame_yz(p['Left'+hipname]-p['Right'+hipname],pelvis_up)
     torso=frame_yz(p['LeftArm']-p['RightArm'],p[neck]-p[spine])
     t={'root_r':root,'torso_r':torso,'hips':p['Hips'],'source_type':source,'fps':fps,'sides':{},'p':p,'r':r}
+    if 'Head' in r:
+        rest = replace(motion, local_p=np.asarray(motion.offsets)[None],
+                       local_r=np.broadcast_to(np.eye(3), (1, len(motion.names), 3, 3)))
+        rest_p, rest_r = rest.fk()
+        neutral = frame_yz(rest_p['LeftArm'] - rest_p['RightArm'], rest_p[neck] - rest_p[spine])[0]
+        if np.linalg.det(neutral) > .99:
+            mount = rest_r['Head'][0].T @ neutral
+            t['head_calibration'] = 'bvh_offsets'
+        else:
+            # Some absolute-position sources describe the rig in frame translations.
+            mount = r['Head'][0].T @ torso[0]
+            t['head_calibration'] = 'bvh_first_frame_degenerate_offsets'
+        t['head_r'] = r['Head'] @ mount
+    else:
+        t['head_r'] = torso.copy()
+        t['head_calibration'] = 'neutral_missing_head'
     offsets=dict(zip(motion.names,motion.offsets))
     if source=='soma':
         fp=REFERENCE/'NVIDIA/soma_retargeter/assets/soma/contact_processing/soma_contact_config.json'

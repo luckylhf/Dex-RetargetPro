@@ -4,6 +4,7 @@ Only difficult upper-body windows enter the sparse pose/velocity solve. The
 initial frax trajectory stays the reference elsewhere; there is no full-clip
 arm branch search or output-only angle filter.
 """
+from .robot_profile import POSE_SIZE
 import time
 import json
 from pathlib import Path
@@ -18,7 +19,7 @@ from .v8.self_collision import windows
 
 def upper_ids(robot):
     legs = {j for g in robot.sides.values() for j in g['leg']}
-    return np.array([j for j in range(3, 32) if j not in legs])
+    return np.array([j for j in range(3, POSE_SIZE) if j not in legs])
 
 
 def torso_errors(robot, t, xs):

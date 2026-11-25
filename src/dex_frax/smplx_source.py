@@ -35,6 +35,10 @@ def adapt(motion,source=None):
  root=frame_yz(p['LeftUpLeg']-p['RightUpLeg'],r['Hips']@profile.SMPLX_PELVIS_LOCAL_UP)
  torso=frame_yz(p['LeftArm']-p['RightArm'],p['Neck']-p['Spine'])
  t=dict(root_r=root,torso_r=torso,hips=p['Hips'],source_type='smplx',fps=50.,sides={},p=p,r=r)
+ C=np.array(profile.SMPLX_Y_UP_TO_Z_UP)
+ neutral=frame_yz(N[idx('left_shoulder')]-N[idx('right_shoulder')],N[idx('neck')]-N[idx('spine1')])
+ t['head_r']=r['Head'] @ (C.T @ neutral)
+ t['head_calibration']='smplx_neutral_skeleton'
  if 'vertical_drift' in z:
   t['scene_ground']=dict(height_m=0.,normal=[0,0,1],method='stationarity_weighted_common_vertical_drift_v1',measured=False)
  for s in profile.SIDE_LAYOUT:
@@ -47,7 +51,6 @@ def adapt(motion,source=None):
   fingers={role:low+'_'+name for role,name in profile.SMPLX_FINGER_JOINTS.items()}
   forward=unit(point(fingers['distal'])-p[s+'Hand']);width=point(fingers['thumb_side'])-point(fingers['little_side']);width=unit(width-forward*(width*forward).sum(1,keepdims=True))
   # SMPL-X neutral joint axes are identity; neutral finger width is in Y-up.
-  C=np.array(profile.SMPLX_Y_UP_TO_Z_UP)
   fwlocal=unit(C.T@(N[idx(fingers['thumb_side'])]-N[idx(fingers['little_side'])]))
   fw=r[s+'ForeArm']@fwlocal;fw=unit(fw-lower*(fw*lower).sum(1,keepdims=True))
   heel=z[s+profile.SMPLX_SOLE_SUFFIXES['heel']];toe=z[s+profile.SMPLX_SOLE_SUFFIXES['toe']];foot=frame_xz(toe-heel,r[s+'Foot']@profile.SMPLX_ANKLE_LOCAL_UP)

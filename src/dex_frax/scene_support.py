@@ -103,7 +103,8 @@ def fit(robot, targets, rows):
 @lru_cache(maxsize=2)
 def scene_model(path, scene_json):
     import mujoco
-    spec = mujoco.MjSpec.from_file(path)
+    from .model_cache import model_spec
+    spec = model_spec(path)
     for i,box in enumerate(json.loads(scene_json)):
         spec.worldbody.add_geom(name=f'retarget_scene_{i}',type=mujoco.mjtGeom.mjGEOM_BOX,
                                 pos=box['center_m'],size=box['half_size_m'])
@@ -119,9 +120,11 @@ def audit_scene(robot, rows, rotations, diagnostics, boxes):
     model = scene_model(robot.path,json.dumps(boxes,sort_keys=True))
     data = mujoco.MjData(model)
     box_ids = [model.geom(f'retarget_scene_{i}').id for i in range(len(boxes))]
-    foot_ids = {int(g['foot']) for g in robot.sides.values()}
-    geoms = np.asarray([i for i in range(model.ngeom) if model.geom_bodyid[i] and
-             (model.geom_group[i]==1 or (model.geom_group[i]==2 and model.geom_bodyid[i] in foot_ids))])
+    from .foot_collision import offline_collision_geoms
+    from .robot_profile import SIDE_LAYOUT
+    foot_hulls = [model.geom(layout['sole_geom']).id for layout in SIDE_LAYOUT.values()]
+    geoms = np.r_[offline_collision_geoms(model), foot_hulls]
+    geoms = geoms[model.geom_bodyid[geoms] != 0]
     radii = model.geom_rbound[geoms]+SUPPORT_ACCEPTANCE_M
     bounds = [(j,np.asarray(b['center_m']),np.asarray(b['half_size_m'])) for j,b in zip(box_ids,boxes)]
     samples = np.arange((len(rows)-1)*8+1)/8.

@@ -1,4 +1,5 @@
 """Reuse only a verified, pre-refinement frax trajectory for hybrid."""
+from .robot_profile import POSE_SIZE
 import copy
 import hashlib
 import json
@@ -61,7 +62,7 @@ class ReusedInitial:
                 raise ValueError('Solver configuration differs')
             with np.load(root/'motion.initial.npz', allow_pickle=False) as saved:
                 x = saved['x'].copy();records = saved['solver_records'].copy()
-                if (x.shape != (len(targets['hips']),32) or records.shape != (len(x),3)
+                if (x.shape != (len(targets['hips']),POSE_SIZE) or records.shape != (len(x),3)
                         or not np.isfinite(x).all() or not np.isfinite(records).all()
                         or not np.array_equal(saved['root_r'],targets['root_r'])
                         or saved['fps'].item() != targets['fps']

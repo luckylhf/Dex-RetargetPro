@@ -1,4 +1,5 @@
 """Guarded arm continuation with event searches and bounded temporal windows."""
+from .robot_profile import POSE_SIZE
 import numpy as np
 from . import robot_profile as target_profile
 from scipy.optimize import least_squares
@@ -122,7 +123,7 @@ def local_temporal(robot,t,xs,cfg,side):
     class Objective:
         def __init__(self,i):self.inner=ArmObjective(robot,t,i,side,xs[i],cfg,xs[i,ids],.12)
         def evaluate(self,x):
-            value,J=self.inner.evaluate(x[ids]);full=np.zeros((len(value),32));full[:,ids]=J;return value,full
+            value,J=self.inner.evaluate(x[ids]);full=np.zeros((len(value),POSE_SIZE));full[:,ids]=J;return value,full
     out=xs.copy();reports=[]
     try:
         for a,b in ranges:
@@ -168,7 +169,7 @@ def recover_windows(robot,t,reference,candidate,cfg,side,progress=None):
     class Objective:
         def __init__(self,i):self.inner=ArmObjective(robot,t,i,side,reference[i],cfg)
         def evaluate(self,x):
-            value,J=self.inner.evaluate(x[ids]);full=np.zeros((len(value),32));full[:,ids]=J;return value,full
+            value,J=self.inner.evaluate(x[ids]);full=np.zeros((len(value),POSE_SIZE));full[:,ids]=J;return value,full
     for a,b in spans:
         detail=dict(start=a,end=b,status='local_solver_failed')
         try:

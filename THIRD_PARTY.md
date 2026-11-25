@@ -20,12 +20,12 @@ SOMA 校准使用 NVIDIA SOMA Retargeter 提交 `cbdb2b494a2af82137bf9b6f15122d6
 
 `assets/dex_evt/` 包含独立的 `LICENSE`、来源清单、URDF、MJCF 和网格。源码分发包保留完整目录及其 OpenAtom Open Hardware License 1.0。使用 Python wheel 时，通过 `DEX_FRAX_ASSETS` 指向另备的匹配资产目录。 [机器人资产说明](assets/dex_evt/README.md)
 
-## 人体参考几何与模型
+## 人体表面几何与模型
 
-`lafan1_surfaces.json` 和 `soma_surfaces.json` 是源人体参考几何表。公开源码仓库、源码分发包和 wheel 均排除这两份文件。使用者须按对应来源条款准备所需的表，并把 `DEX_FRAX_SOURCE_GEOMETRY` 指向表所在目录。 [来源及适用条款](src/dex_frax/v8/reference/SOURCE_GEOMETRY.md)
+`lafan1_surfaces.json` 和 `soma_surfaces.json` 是外置人体表面几何表。使用者按对应来源条款准备所需的表，并把 `DEX_FRAX_SOURCE_GEOMETRY` 指向表所在目录。 [来源及适用条款](src/dex_frax/v8/reference/SOURCE_GEOMETRY.md)
 
 SMPL-X 人体模型参数不随项目分发，须从 [SMPL-X 官方网站](https://smpl-x.is.tue.mpg.de/) 按其许可获取。
 
 ## 输入数据
 
-回归测试使用测试代码生成的动作。请自行获取有权使用的人体动作，并将输入、轨迹和报告放在本地 `examples/` 或 `outputs/`。公开分享前按原始素材的许可核对输入和转换结果的分发权限。 [LAFAN1 许可](https://github.com/ubisoft/ubisoft-laforge-animation-dataset/blob/master/license.txt)
+人体动作及其转换产物遵循对应输入数据的使用和分发条款。 [LAFAN1 许可](https://github.com/ubisoft/ubisoft-laforge-animation-dataset/blob/master/license.txt)

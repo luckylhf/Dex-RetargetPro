@@ -37,7 +37,8 @@ class CollisionModel:
             from ..model_cache import collision_model
             self.m=collision_model(robot.m)
         m=self.m
-        ids = np.flatnonzero(m.geom_group == 1)
+        from ..foot_collision import offline_collision_geoms
+        ids = offline_collision_geoms(m)
         self.arms = {}
         available = {m.geom(i).name: int(i) for i in ids}
         for side, layout in robot_profile.SIDE_LAYOUT.items():
@@ -56,15 +57,14 @@ class CollisionModel:
         self.exclusions=[]
         if self.cfg.get('coverage')=='full':
             self.scope='nonadjacent_full_body'
-            # The roll housing is inside the pelvis/waist gimbal assembly.
             # Same/welded and direct parent bodies are excluded by Mink.
-            assembly={frozenset(pair) for pair in robot_profile.ASSEMBLY_COLLISION_EXCLUSIONS}
+            assembly=robot_profile.ASSEMBLY_COLLISION_EXCLUSIONS
             groups=[]
             for k,a in enumerate(ids):
                 for b in ids[k+1:]:
                     names=[m.geom(int(a)).name,m.geom(int(b)).name]
                     if frozenset(names) in assembly:
-                        self.exclusions.append(dict(pair=names,reason='pelvis/waist nested gimbal housing'))
+                        self.exclusions.append(dict(pair=names,reason=assembly[frozenset(names)]))
                     else:groups.append(([int(a)],[int(b)]))
 
         if self.foot_coverage is not None:
@@ -209,8 +209,8 @@ def _repair_window(model, t, xs, solver_cfg, a, b, sides, options=None):
     coupled=bool(options and options.get('coupled'))
     if coupled:sides=list(r.sides)
     repair_started=time.perf_counter()
-    ids = np.asarray(options['_moving_ids'],int) if coupled and options.get('_moving_ids') is not None else (np.arange(32) if coupled else np.array(sum([r.sides[s]['arm'] for s in sides], [])))
-    if len(np.unique(ids))!=len(ids) or np.any((ids<0)|(ids>=32)):raise ValueError('invalid_moving_columns')
+    ids = np.asarray(options['_moving_ids'],int) if coupled and options.get('_moving_ids') is not None else (np.arange(robot_profile.POSE_SIZE) if coupled else np.array(sum([r.sides[s]['arm'] for s in sides], [])))
+    if len(np.unique(ids))!=len(ids) or np.any((ids<0)|(ids>=robot_profile.POSE_SIZE)):raise ValueError('invalid_moving_columns')
     width=len(ids)
     arm_ids=np.array(sum([r.sides[s]['arm'] for s in sides], []))
     bodies = list(r.surface_models) if coupled else _arm_bodies(r, sides)

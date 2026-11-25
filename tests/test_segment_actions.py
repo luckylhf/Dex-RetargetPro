@@ -1,3 +1,4 @@
+from dex_frax.robot_profile import JOINT_COUNT
 from pathlib import Path
 
 import numpy as np
@@ -98,6 +99,6 @@ def test_failed_segment_publish_restores_previous_generation(tmp_path,monkeypatc
         return replace(source,destination)
     monkeypatch.setattr(os,'replace',fail)
     with pytest.raises(OSError,match='simulated write failure'):
-        publish_trial(new,old,{'dof_pos':np.zeros((2,29))})
+        publish_trial(new,old,{'dof_pos':np.zeros((2,JOINT_COUNT))})
     for suffix in ('.npz','.check.json','.pose_errors.npz','.json','.pkl'):
         assert old.with_suffix(suffix).read_bytes()==b'old generation'

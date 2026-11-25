@@ -9,7 +9,7 @@ ASSETS = Path(os.environ.get("DEX_FRAX_ASSETS", ROOT / ASSET_DIRECTORY)).expandu
 
 def is_runtime_asset(relative):
     path = Path(relative)
-    return path.as_posix() not in {"README.md", "LICENSE"} and not any(
+    return path.parts[:1] != ('tools',) and path.as_posix() not in {"README.md", "LICENSE"} and not any(
         part == ".DS_Store" or part.startswith("._") for part in path.parts
     )
 

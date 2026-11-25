@@ -1,3 +1,4 @@
+from dex_frax.robot_profile import POSE_SIZE
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -12,7 +13,7 @@ def test_reduced_leg_box_projects_every_moving_hinge_without_changing_root_or_wa
     robot = Robot()
     hinges = np.array([i for side in robot.sides.values() for i in side['leg']])
     ids = np.r_[2, hinges]
-    current = np.clip(np.zeros(32), robot.lower + 1e-7, robot.upper - 1e-7)
+    current = np.clip(np.zeros(POSE_SIZE), robot.lower + 1e-7, robot.upper - 1e-7)
     current[2] = 0.7
     current[hinges[0]] = robot.upper[hinges[0]] - .001
     angular_step = robot.speed_limits[hinges - 3] / 50.
@@ -29,14 +30,14 @@ def test_reduced_leg_box_projects_every_moving_hinge_without_changing_root_or_wa
             assert np.all(abs(projected[1:]-current[hinges]) <= angular_step+1e-12)
         full = current.copy()
         full[ids] = projected
-        fixed = np.setdiff1d(np.arange(32),ids)
+        fixed = np.setdiff1d(np.arange(POSE_SIZE),ids)
         np.testing.assert_array_equal(current[fixed],full[fixed])
 
 
 @pytest.mark.parametrize('n', [1,23])
 def test_root_corridor_admits_source_relative_speed_and_fixed_geometry_clearance(n):
     robot = Robot()
-    poses = np.zeros((n,32))
+    poses = np.zeros((n,POSE_SIZE))
     poses[:,2] = .75
     poses[n//2,2] = .05
     rotations = np.tile(np.eye(3),(n,1,1))

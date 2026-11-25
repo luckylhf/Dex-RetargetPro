@@ -1,3 +1,4 @@
+from dex_frax.robot_profile import POSE_SIZE
 import json
 import math
 import pickle
@@ -162,7 +163,7 @@ def test_direct_collision_passes_remaining_time_to_qp(monkeypatch):
     monkeypatch.setattr(refine_pipeline, 'window_targets', lambda *args: {})
     monkeypatch.setattr(refine_pipeline, 'collision_seams', lambda *args: dict(freeze_start=True, freeze_end=True))
     monkeypatch.setattr(refine_pipeline, '_repair_window', solve)
-    rows = np.zeros((8, 32))
+    rows = np.zeros((8, POSE_SIZE))
     robot = SimpleNamespace(sides={'Left': {}, 'Right': {}})
     job = dict(module='collision', side=None, start=0, end=8)
     refine_pipeline.propose(robot, {}, rows, rows, {}, None, job, 'direct10', 103.)

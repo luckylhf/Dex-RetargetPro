@@ -1,3 +1,4 @@
+from dex_frax.robot_profile import JOINT_COUNT, POSE_SIZE
 import json
 import pickle
 
@@ -17,7 +18,7 @@ def test_pelvis_contact_reaches_export_audit_and_is_kept(tmp_path):
     p, data, meta, dg = export_neutral(tmp_path, n=40)
     robot = Robot()
     configure(robot, meta['configuration']['anatomy'])
-    x = np.r_[0., 0., 1., np.zeros(29)]
+    x = np.r_[0., 0., 1., np.zeros(JOINT_COUNT)]
     robot.set(x, np.eye(3))
     side = min(robot.sides, key=lambda key: robot.point(robot.sides[key]['foot'], robot.lowest(key))[2])
     foot = robot.sides[side]
@@ -68,7 +69,7 @@ def test_pelvis_contact_reaches_export_audit_and_is_kept(tmp_path):
 
 
 def test_root_rotation_guard_preserves_window_flight_and_existing_angle_gate():
-    rows=np.zeros((12,32))
+    rows=np.zeros((12,POSE_SIZE))
     rr=np.repeat(np.eye(3)[None],12,axis=0)
     t=dict(root_r=rr,source_root_r=rr,root_p=rows[:,:3],fps=50.,source_airborne=np.arange(12)==5)
     meters=dict(torso=np.zeros(12))

@@ -8,10 +8,18 @@ import copy
 import numpy as np
 import mujoco
 from scipy.spatial import ConvexHull
-from .robot_profile import SIDE_LAYOUT
+from .robot_profile import SIDE_LAYOUT, JOINT_COUNT
 
 POLICY='full_feet_and_external_foot_shin_v1'
 _CACHE=OrderedDict()
+
+
+def offline_collision_geoms(model):
+    """Select declared collision geoms, excluding the simulator's sole primitives."""
+    foot_bodies = [model.body(layout['bodies']['foot']).id for layout in SIDE_LAYOUT.values()]
+    sole_types = (mujoco.mjtGeom.mjGEOM_CYLINDER, mujoco.mjtGeom.mjGEOM_CAPSULE)
+    sole_primitives = np.isin(model.geom_type, sole_types) & np.isin(model.geom_bodyid, foot_bodies)
+    return np.flatnonzero((model.geom_group == 1) & ~sole_primitives)
 
 
 def vertices(robot,geom,body):
@@ -39,9 +47,10 @@ def augmented(robot):
     if key in _CACHE:
         _CACHE.move_to_end(key);_,model,record=_CACHE[key]
         return model,copy.deepcopy(record)
-    saved=robot.d.qpos.copy();spec=mujoco.MjSpec.from_file(robot.path);record={'policy':POLICY,'sides':{}}
+    from .model_cache import model_spec
+    saved=robot.d.qpos.copy();spec=model_spec(robot.path);record={'policy':POLICY,'sides':{}}
     try:
-        robot.set(np.r_[0.,0.,1.,np.zeros(29)],np.eye(3))
+        robot.set(np.r_[0.,0.,1.,np.zeros(JOINT_COUNT)],np.eye(3))
         for side,suffix in (('Left','l'),('Right','r')):
             g=robot.sides[side];foot=g['foot'];layout=SIDE_LAYOUT[side];name=layout['bodies']['foot']
             v=vertices(robot,robot.m.geom(layout['sole_geom']).id,foot)
@@ -82,7 +91,7 @@ def augmented(robot):
     finally:
         from scipy.spatial.transform import Rotation
         robot.set(np.r_[saved[:3],saved[robot.qadr]],Rotation.from_quat(saved[3:7][[1,2,3,0]]).as_matrix())
-    ids=np.flatnonzero(model.geom_group==1)
+    ids=offline_collision_geoms(model)
     extra=[model.geom(v['full_geom']).id for v in record['sides'].values()]
     extra += [model.geom(name).id for v in record['sides'].values() for name in v['external_parts']+[v['shaft_geom']]]
     ids=np.unique(np.r_[ids,extra])

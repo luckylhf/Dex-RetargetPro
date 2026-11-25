@@ -19,7 +19,8 @@ def render(paths, output, fps=25):
         raise ValueError("Preview requires 50 Hz XYZW motion PKLs")
     if len({len(d["dof_pos"]) for d in data}) != 1 or not 1 <= fps <= 50:
         raise ValueError("Synchronized comparison needs equal lengths and 1 <= fps <= 50")
-    spec = mujoco.MjSpec.from_file(str(ASSETS / MODEL_XML))
+    from .model_cache import model_spec
+    spec = model_spec(ASSETS / MODEL_XML)
     spec.geom("floor").rgba = [.22, .25, .29, 1.]
     spec.worldbody.add_light(pos=[2., -3., 5.], dir=[-.2, .3, -1.], diffuse=[.9, .9, .9])
     model = spec.compile()

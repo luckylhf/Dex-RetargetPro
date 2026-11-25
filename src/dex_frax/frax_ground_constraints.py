@@ -1,4 +1,5 @@
 """Support, swept floor and root-velocity constraints for whole-motion limb IK."""
+from .robot_profile import POSE_SIZE
 import threading
 
 import jax
@@ -22,7 +23,7 @@ def stage_targets(t):
     """Rotations use exactly the shortest-arc interpolation of the export audit."""
     reference = np.asarray(t['full_chain_reference'])
     rotations = np.asarray(t['root_r'])
-    if reference.shape != (len(rotations), 32) or not np.isfinite(reference).all():
+    if reference.shape != (len(rotations), POSE_SIZE) or not np.isfinite(reference).all():
         raise ValueError('Invalid whole-motion Frax reference')
     previous_r = np.concatenate([rotations[:1],rotations[:-1]])
     delta = Rotation.from_matrix(previous_r.transpose(0,2,1) @ rotations).as_rotvec()

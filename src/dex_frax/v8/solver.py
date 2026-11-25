@@ -1,7 +1,7 @@
 """Bounded whole-body IK, analytic MuJoCo Jacobians, shared pelvis translation.
 
 The pelvis rotation comes from calibrated source anatomy. Translation and all
-29 hinges are solved together, so both support legs constrain the SAME root.
+all hinges are solved together, so both support legs constrain the SAME root.
 No output-stage root-height lift or pasted historical leg trajectory is used.
 """
 import numpy as np
@@ -12,12 +12,15 @@ from .math3d import unit,skew
 from .anatomy import wrist_barrier
 from .task_weights import hand_weights
 from .contact_tasks import body_height_task
+from .source import head_relative_target
 
 class Objective:
     def __init__(self,robot,t,i,weights,previous=None,predicted=None):
         self.robot,self.t,self.i,self.w=robot,t,i,weights
         self.prev,self.pred=previous,predicted
         self.cache_x=None
+        torso = t['torso_r'][i:i+1]
+        self.head_target = head_relative_target(torso, t.get('head_r', t['torso_r'])[i:i+1])[0]
 
     def evaluate(self,x):
         if self.w.get('_repair_deadline') is not None:
@@ -45,6 +48,13 @@ class Objective:
             add(v-target,(np.eye(3)-np.outer(v,v))@(Jb-Ja)/length,weight)
         add(x[:3]-t['root_p'][i],eye[:3],w['root_position'])
         for ax in (0,2):axis(rob.torso,np.eye(3)[ax],t['torso_r'][i,:,ax],w['torso_orientation'])
+        _, _, head_jac = body(rob.head)
+        _, _, torso_jac = body(rob.torso)
+        for ax in (0, 1):
+            current = rob.rot(rob.head)[:, ax]
+            target = rob.rot(rob.torso) @ self.head_target[:, ax]
+            add(current - target, -skew(current) @ head_jac + skew(target) @ torso_jac,
+                w['head_orientation'])
         for side,v in t['sides'].items():
             g=rob.sides[side]
             hand_direction_weight,hand_width_weight=hand_weights(w,v,i)
@@ -145,8 +155,8 @@ def bounded_seed(values, lo, hi):
 
 
 def solve(robot,t,cfg,progress=None,*,anchors=None):
-    n=len(t['hips']);xs=np.empty((n,32));records=[]
-    x=np.r_[t['root_p'][0],np.zeros(29)]
+    n=len(t['hips']);xs=np.empty((n,target_profile.POSE_SIZE));records=[]
+    x=np.r_[t['root_p'][0],np.zeros(target_profile.JOINT_COUNT)]
     for g in robot.sides.values():x[g['arm'][3]]=-.4;x[g['leg'][3]]=.15
     if '_seed_pose' in cfg:x=np.asarray(cfg['_seed_pose']).copy()
     lower=robot.lower.copy();upper=robot.upper.copy()

@@ -1,3 +1,4 @@
+from dex_frax.robot_profile import JOINT_COUNT
 import json
 import pickle
 
@@ -27,7 +28,7 @@ def test_first_pass_lifts_and_settles_complete_supported_episode(tmp_path):
     n=40
     p,data,meta,dg=export_neutral(tmp_path,n)
     robot=Robot();configure(robot,meta['configuration']['anatomy'])
-    row=np.r_[0.,0.,1.,np.zeros(29)]
+    row=np.r_[0.,0.,1.,np.zeros(JOINT_COUNT)]
     robot.set(row,np.eye(3))
     side=min(robot.sides,key=lambda s:robot.point(robot.sides[s]['foot'],robot.lowest(s))[2])
     g=robot.sides[side]

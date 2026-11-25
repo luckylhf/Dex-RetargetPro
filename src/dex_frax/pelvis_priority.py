@@ -3,7 +3,7 @@ import json
 import os
 import time
 import numpy as np
-from .robot_profile import WAIST_JOINTS
+from .robot_profile import WAIST_JOINTS, POSE_SIZE
 from scipy.optimize import least_squares, minimize
 from scipy.spatial.transform import Rotation
 
@@ -87,7 +87,7 @@ def solve_protected(robot,t,cfg,baseline,base_solver,root_mode='source',progress
     for name,moving in stages:
         if progress:print('initial: '+name,flush=True)
         limb_start=time.monotonic()
-        mask=np.ones(32,bool);mask[moving]=False;reference=rows.copy()
+        mask=np.ones(POSE_SIZE,bool);mask[moving]=False;reference=rows.copy()
         local=dict(t,priority_pose=reference,priority_mask=mask,foot_self_collision=name=='feet',arm_self_collision=name=='arms')
         if full_chain is not None:
             local['full_chain_reference'] = baseline

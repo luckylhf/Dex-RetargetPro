@@ -6,7 +6,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 from .cli import convert, sha
-from .robot_profile import MODEL_XML
+from .robot_profile import MODEL_XML, POSE_SIZE
 
 
 class V8Seed:
@@ -32,7 +32,7 @@ class V8Seed:
             n = len(targets["root_p"])
             rows = np.c_[z["root_pos"], z["dof_pos"]]
             quat = z["root_rot"]
-            if float(z["fps"]) != float(targets["fps"]) or rows.shape != (n, 32) or quat.shape != (n, 4):
+            if float(z["fps"]) != float(targets["fps"]) or rows.shape != (n, POSE_SIZE) or quat.shape != (n, 4):
                 raise ValueError("V8 checkpoint timeline or shape differs")
             if not np.isfinite(rows).all() or not np.isfinite(quat).all():
                 raise ValueError("V8 checkpoint contains nonfinite data")

@@ -15,6 +15,7 @@
     "max_iterations": 30,
     "root_position": 6.0,
     "torso_orientation": 3.0,
+    "head_orientation": 3.0,
     "leg_direction": 1.0,
     "foot_position": 30.0,
     "contact_position": 180.0,

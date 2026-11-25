@@ -1,4 +1,5 @@
 """CLI and independently identified, quality-gated motion outputs."""
+from .robot_profile import JOINT_COUNT
 import argparse
 import hashlib
 import importlib.metadata
@@ -182,7 +183,7 @@ def convert(args):
             with np.load(pkl.with_suffix('.npz'),allow_pickle=False) as data:
                 n=meta['output_frames']
                 if not all(data[k].shape==(n,width) and np.isfinite(data[k]).all()
-                           for k,width in [('root_pos',3),('root_rot',4),('dof_pos',29)]):
+                           for k,width in [('root_pos',3),('root_rot',4),('dof_pos',JOINT_COUNT)]):
                     raise ValueError('Fast output contains invalid motion arrays')
         from .acceptance import evaluate
         from .resource_events import phase

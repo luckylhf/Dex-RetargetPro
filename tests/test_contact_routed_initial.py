@@ -1,3 +1,4 @@
+from dex_frax.robot_profile import POSE_SIZE
 import numpy as np
 import pytest
 import json
@@ -46,8 +47,8 @@ def test_expansion_merges_nearby_sections_and_clips_to_valid_frames():
 def test_bad_join_moves_outward_and_preserves_whole_frames():
     joins = SectionJoins.__new__(SectionJoins)
     joins.targets = {}
-    joins.legacy = np.zeros((30, 32))
-    joins.landing = np.ones((30, 32))
+    joins.legacy = np.zeros((30, POSE_SIZE))
+    joins.landing = np.ones((30, POSE_SIZE))
     joins.check_direct = lambda cut, entering: 'motor_speed' if cut in (9, 17) else None
     required = np.zeros(30, dtype=bool)
     required[12:14] = True
@@ -66,8 +67,8 @@ def test_expansion_and_join_search_do_not_cross_flight():
     flight = np.zeros(24, dtype=bool)
     flight[[6, 14]] = True
     joins.targets = {'source_airborne': flight}
-    joins.legacy = np.zeros((24, 32))
-    joins.landing = np.ones((24, 32))
+    joins.legacy = np.zeros((24, POSE_SIZE))
+    joins.landing = np.ones((24, POSE_SIZE))
     checked = []
     fitted = []
 
@@ -96,8 +97,8 @@ def test_expansion_and_join_search_do_not_cross_flight():
 def test_unresolved_join_stops_at_flight_boundary():
     joins = SectionJoins.__new__(SectionJoins)
     joins.targets = {'source_airborne': [True, False, False, False, False]}
-    joins.legacy = np.zeros((5, 32))
-    joins.landing = np.ones((5, 32))
+    joins.legacy = np.zeros((5, POSE_SIZE))
+    joins.landing = np.ones((5, POSE_SIZE))
     joins.check_direct = lambda cut, entering: 'motor_speed'
 
     def fail_fit(*args):
@@ -109,7 +110,7 @@ def test_unresolved_join_stops_at_flight_boundary():
 
 
 def test_lift_correction_smooths_only_changed_unprotected_rows():
-    parent = np.zeros((8, 32))
+    parent = np.zeros((8, POSE_SIZE))
     lifted = parent.copy()
     lifted[1:7, 2] = [.01, .05, .02, .06, .05, .01]
     protected = np.zeros(8, dtype=bool)

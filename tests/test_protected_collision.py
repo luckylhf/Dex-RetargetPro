@@ -1,3 +1,4 @@
+from dex_frax.robot_profile import JOINT_COUNT
 import time
 
 import numpy as np
@@ -18,7 +19,7 @@ def model():
 def contact_scene(model, left_hip_roll, frames=15):
     """Construct foot/foot or hand/thigh overlap using the production meshes."""
     robot = model.r
-    row = np.r_[[0., 0., 1.], np.clip(np.zeros(29), robot.lower[3:], robot.upper[3:])]
+    row = np.r_[[0., 0., 1.], np.clip(np.zeros(JOINT_COUNT), robot.lower[3:], robot.upper[3:])]
     row[robot.sides['Left']['leg'][1]] = left_hip_roll
     robot.set(row, np.eye(3))
     row[2] -= min(robot.point(b)[2] + (s['hull'] @ robot.rot(b)[2]).min()

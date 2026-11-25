@@ -3,6 +3,7 @@
 The callback measures the unchanged full collision model. Only pairs affected
 by arm joints enter this stage; final independent export acceptance is unchanged.
 """
+from .robot_profile import POSE_SIZE
 import threading
 import numpy as np
 import mujoco
@@ -52,7 +53,7 @@ class ArmGeometry(InequalityConstraint):
         self.geometry=submodel(full,selected)
         self.lock=threading.Lock()
         self.robot=kinematics;self.gain=float(gain)
-        self.columns=np.arange(32) if columns is None else np.asarray(columns,int)
+        self.columns=np.arange(POSE_SIZE) if columns is None else np.asarray(columns,int)
         self.num_columns=len(self.columns)
         self.num_rows=len(self.geometry.pairs);self.penalty=1e8
         self.margin=float(full.cfg['margin_m'])
@@ -125,7 +126,7 @@ class ArmGeometry(InequalityConstraint):
         with self.lock:return self._measure(q,q,True)
 
     def rows(self,q,ref):
-        if self.num_columns!=32:q=ref['priority_pose'].at[self.columns].set(q)
+        if self.num_columns!=POSE_SIZE:q=ref['priority_pose'].at[self.columns].set(q)
         if 'priority_pose' in ref:
             q=jnp.where(ref['priority_mask'],ref['priority_pose'],q)
         G,gap=jax.pure_callback(self.measure_swept,

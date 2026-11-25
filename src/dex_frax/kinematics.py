@@ -1,6 +1,6 @@
-"""frax kinematics with V8's prescribed pelvis rotation and 32 unknowns.
+"""Frax kinematics with V8's prescribed pelvis rotation.
 
-The reduced coordinates are [world pelvis XYZ, 29 named hinges]. Pelvis
+The reduced coordinates are [world pelvis XYZ, named hinges]. Pelvis
 orientation is an input per frame, exactly as in V8, rather than a soft task.
 Fixed link offsets are derived from the unchanged MuJoCo asset and verified
 against frax at random poses before conversion.
@@ -13,19 +13,19 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import numpy as np
 from frax import Robot as FraxRobot
-from dex_frax.robot_profile import MODEL_URDF
+from dex_frax.robot_profile import MODEL_URDF, JOINT_COUNT, POSE_SIZE
 from .paths import ASSETS
 
 
 @jax.tree_util.register_static
 class DexKinematics:
-    nq = nv = 32
+    nq = nv = POSE_SIZE
 
     def __init__(self, robot):
         self.frax = FraxRobot(str(ASSETS / MODEL_URDF), joint_ordering=robot.names)
         if self.frax.joint_names != robot.names:
             raise ValueError("frax joint ordering differs from Dex model")
-        robot.set(np.zeros(32), np.eye(3))
+        robot.set(np.zeros(POSE_SIZE), np.eye(3))
         m = robot.m
         joint_to_idx = {int(j): i for i, j in enumerate(robot.jids)}
         indices, offsets = [], []
@@ -65,7 +65,7 @@ class DexKinematics:
         max_pos = max_rot = 0.
         # World body is intentionally excluded: it is not attached to pelvis.
         for i in range(count):
-            q = np.zeros(29) if i == 0 else rng.uniform(np.maximum(robot.lower[3:], -.8), np.minimum(robot.upper[3:], .8))
+            q = np.zeros(JOINT_COUNT) if i == 0 else rng.uniform(np.maximum(robot.lower[3:], -.8), np.minimum(robot.upper[3:], .8))
             x = np.r_[rng.normal(size=3), q]
             r = Rotation.from_rotvec(rng.normal(size=3) * .4).as_matrix()
             robot.set(x, r)

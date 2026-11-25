@@ -72,7 +72,7 @@ def audit(path,write=True,cache=None,changed=None):
     cache={} if cache is None else cache
     key=digest(meta,dg,rob.path)
     valid=valid_rows(cache,data,changed,key)
-    valid = valid and 'pelvis_in_foot' in cache['frames']
+    valid = valid and {'pelvis_in_foot', 'head_orientation'} <= cache['frames'].keys()
     if valid:
         values=cache['frames']
     else:
@@ -81,11 +81,12 @@ def audit(path,write=True,cache=None,changed=None):
             contact_xyz={s:[None]*n for s in rob.sides},allp={s:[None]*n for s in rob.sides},
             flat_tilt={s:[None]*n for s in rob.sides},flat_heel={s:[None]*n for s in rob.sides},
             pelvis_in_foot={s:[None]*n for s in rob.sides},
-            root_orientation=[None]*n,torso_orientation=[None]*n,torso_up=[None]*n,
+            root_orientation=[None]*n,torso_orientation=[None]*n,torso_up=[None]*n,head_orientation=[None]*n,
             body_heights=[None]*n,body_errors={c['body_name']:{'normal_cm':[None]*n,'fixed_xy_cm':[None]*n} for c in meta.get('body_contact_models',[])})
     errors=values['errors'];contact_xyz=values['contact_xyz'];allp=values['allp']
     flat_tilt=values['flat_tilt'];flat_heel=values['flat_heel']
     root_orientation=values['root_orientation'];torso_orientation=values['torso_orientation'];torso_up=values['torso_up']
+    head_orientation=values['head_orientation']
     body_heights=values['body_heights'];body_errors=values['body_errors']
     contact_vel={s:[] for s in rob.sides}
     root_speed=np.linalg.norm(np.gradient(data['root_pos'].astype(float),1/fps,axis=0),axis=1)
@@ -95,6 +96,10 @@ def audit(path,write=True,cache=None,changed=None):
         root_orientation[i]=np.degrees(Rotation.from_matrix(dg['root_r'][i].T@rr[i]).magnitude())
         torso_orientation[i]=np.degrees(Rotation.from_matrix(dg['torso_target'][i].T@rob.rot(rob.torso)).magnitude())
         torso_up[i]=ang(dg['torso_target'][i,:,2],rob.rot(rob.torso)[:,2])
+        if 'head_relative_target' in dg:
+            relative = rob.rot(rob.torso).T @ rob.rot(rob.head)
+            head_orientation[i] = np.rad2deg(Rotation.from_matrix(
+                dg['head_relative_target'][i].T @ relative).magnitude())
         for s,g in rob.sides.items():
             d=errors[s];v=lambda k:dg[s+'_'+k][i]
             for a,b,k in [('shoulder','elbow','upper'),('elbow','wrist','lower'),('hip','knee','thigh'),('knee','foot','shin')]:
@@ -157,6 +162,7 @@ def audit(path,write=True,cache=None,changed=None):
         'root_step_cm':stats(np.linalg.norm(np.diff(data['root_pos'],axis=0),axis=1)*100),
         'root_target_difference_cm':stats(np.linalg.norm(data['root_pos']-dg['root_target'],axis=1)*100),
         'root_orientation_deg':stats(root_orientation),'torso_orientation_deg':stats(torso_orientation),
+        'head_orientation_deg':stats(present(head_orientation)),
         'torso_up_deg':stats(torso_up),'stationary_floating_longest_seconds':floating['longest_seconds'],
         'floating_audit':floating,
         'sides':{},'contact_segments':segments,

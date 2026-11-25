@@ -3,6 +3,7 @@
 CPU callbacks use the same MuJoCo/Mink geometry as the independent output audit.
 This is an initial solve constraint, not a rebase of a repair's fixed reference.
 """
+from .robot_profile import POSE_SIZE
 import threading
 import numpy as np
 import jax
@@ -29,7 +30,7 @@ class FootSupport(InequalityConstraint):
     def __init__(self,kinematics,robot,gain,columns=None,space=None,full_chain=False):
         self.robot=kinematics if space is None else space
         self.kinematics=kinematics;self.sides=robot.sides;self.gain=float(gain)
-        self.columns=np.arange(32) if columns is None else np.asarray(columns,int)
+        self.columns=np.arange(POSE_SIZE) if columns is None else np.asarray(columns,int)
         self.full_chain=full_chain
         self.num_rows=22 if full_chain else 14
         self.penalty=(np.r_[np.repeat(4e8,2),np.repeat(4e8,12),np.repeat(1e8,8)]
@@ -37,7 +38,7 @@ class FootSupport(InequalityConstraint):
 
     def rows(self,q,ref):
         def values(x):
-            if len(self.columns)!=32:x=ref['priority_pose'].at[self.columns].set(x)
+            if len(self.columns)!=POSE_SIZE:x=ref['priority_pose'].at[self.columns].set(x)
             if 'priority_mask' in ref:x=jnp.where(ref['priority_mask'],ref['priority_pose'],x)
             tf=self.kinematics.transforms(x,ref['root_r']);p=tf[:,:3,3];r=tf[:,:3,:3];out=[]
             for side,g in self.sides.items():

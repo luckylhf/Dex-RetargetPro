@@ -4,6 +4,7 @@ The two Euler representations describe the same target orientation. They are
 resolved once with full temporal context, then projected to the original joint
 and speed bounds. This is a soft IK reference, never an accepted trajectory.
 """
+from .robot_profile import POSE_SIZE
 import time
 import warnings
 import numpy as np
@@ -73,7 +74,7 @@ def prepare(robot, targets, weights):
     if n < 2: return targets, dict(policy=POLICY, used=False, reason='too_short')
     references = []; details = {}
     try:
-        zero = np.zeros(32)
+        zero = np.zeros(POSE_SIZE)
         robot.set(zero, np.eye(3))
         bases = {side: frame_yz(np.array([0., 1., 0.]),
                    -unit(robot.rot(g['shoulder']).T@(robot.point(g['elbow'])-robot.point(g['shoulder']))))

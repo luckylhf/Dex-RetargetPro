@@ -1,3 +1,4 @@
+from dex_frax.robot_profile import JOINT_COUNT
 import numpy as np
 from scipy.spatial.transform import Rotation
 
@@ -11,7 +12,7 @@ def test_swept_rows_match_visual_hull_auditor_and_endpoint_jacobian():
     robot=Robot()
     ids=np.r_[2,robot.sides['Left']['leg'],robot.sides['Right']['leg']]
     con=SweptFloor(HingeSpace(len(ids)),robot,50.,ids)
-    prior=np.r_[0.,0.,.85,np.zeros(29)]
+    prior=np.r_[0.,0.,.85,np.zeros(JOINT_COUNT)]
     now=prior.copy()
     now[2]-=.07
     now[robot.sides['Left']['leg'][3]]=.26

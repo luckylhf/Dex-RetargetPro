@@ -1,3 +1,4 @@
+from dex_frax.robot_profile import JOINT_COUNT, POSE_SIZE
 import time
 import numpy as np
 import pytest
@@ -50,7 +51,7 @@ def test_one_solver_tries_hand_before_leg_and_keeps_fixed_reference(monkeypatch,
     monkeypatch.setattr(leg,'plan',lambda m,t,x,a,b,ids:(np.ones((b-a,len(ids)))*.1,{}))
     monkeypatch.setattr(repair,'collision_seams',lambda *args:dict(freeze_start=False,freeze_end=False))
     monkeypatch.setattr(joint,'geometric_seed',lambda m,t,x,*args:x)
-    rows=np.zeros((5,32));ref=rows.copy();calls=[]
+    rows=np.zeros((5,POSE_SIZE));ref=rows.copy();calls=[]
     def solve(m,t,x,w,a,b,sides,options):
         calls.append(options)
         assert options['_reference'] is ref
@@ -72,7 +73,7 @@ def test_one_solver_tries_hand_before_leg_and_keeps_fixed_reference(monkeypatch,
                                'hand_leg5',time.monotonic()+3.,{})
     assert detail['route']=='cooperate' and len(calls)==3
     np.testing.assert_array_equal(rows,0.)
-    fixed=np.setdiff1d(np.arange(32),detail['moving_ids'])
+    fixed=np.setdiff1d(np.arange(POSE_SIZE),detail['moving_ids'])
     np.testing.assert_array_equal(result[:,fixed],rows[:,fixed])
 
 
@@ -83,7 +84,7 @@ def test_arm_only_success_never_opens_legs(monkeypatch,model):
     def solve(*args):
         calls.append(args[-1]);return args[2].copy(),{}
     monkeypatch.setattr(joint,'_repair_window',solve)
-    rows=np.zeros((5,32));job=dict(start=0,end=5,hand_leg_pair_ids=[pair(model)])
+    rows=np.zeros((5,POSE_SIZE));job=dict(start=0,end=5,hand_leg_pair_ids=[pair(model)])
     _,detail=joint.propose(model,{},rows,rows.copy(),dict(leg_direction=1.,arm_direction=6.),
                           job,'hand_leg10',time.monotonic()+3.,{})
     assert detail['route']=='arms_only' and detail['leg_sides']==[] and len(calls)==1
@@ -91,7 +92,7 @@ def test_arm_only_success_never_opens_legs(monkeypatch,model):
 
 def test_guard_rejects_waist_changes_in_joint_proposal(model):
     from dex_frax.refine_pipeline import guard
-    r=model.r;row=np.r_[0.,0.,1.,np.zeros(29)]
+    r=model.r;row=np.r_[0.,0.,1.,np.zeros(JOINT_COUNT)]
     row[3:]=np.clip(row[3:],r.lower[3:]+1e-4,r.upper[3:]-1e-4)
     waist=3+r.names.index('waist_yaw_joint')
     before=np.tile(row,(5,1));after=before.copy();after[:,waist]+=.00001
@@ -106,7 +107,7 @@ def test_guard_rejects_waist_changes_in_joint_proposal(model):
 def test_pipeline_dispatches_hand_leg_before_regular_geometry(monkeypatch, model, stage, recipe):
     from dex_frax import refine_pipeline
 
-    rows = np.zeros((7, 32))
+    rows = np.zeros((7, POSE_SIZE))
     job = dict(module=stage, side=None, start=1, end=6, hand_leg_pair_ids=[pair(model)])
     progress = {}
     monkeypatch.setattr(refine_pipeline, 'window_targets', lambda *args: {})
@@ -131,7 +132,7 @@ def test_resume_keeps_each_start_separate_and_does_not_retry_completed_failures(
     monkeypatch.setattr(leg,'plan',lambda m,t,x,a,b,ids:(np.ones((b-a,len(ids)))*.1,{}))
     monkeypatch.setattr(repair,'collision_seams',lambda *args:{})
     monkeypatch.setattr(joint,'geometric_seed',lambda m,t,x,*args:x)
-    rows=np.zeros((5,32));reference=rows.copy();progress={};first=[]
+    rows=np.zeros((5,POSE_SIZE));reference=rows.copy();progress={};first=[]
     def interrupted(*args):
         state=args[-1]['_progress'];first.append(state)
         if len(first)==1:raise ValueError('collision_qp_primal infeasible')

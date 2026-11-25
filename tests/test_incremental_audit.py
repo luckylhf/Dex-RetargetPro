@@ -1,3 +1,4 @@
+from dex_frax.robot_profile import JOINT_COUNT
 import copy,json,pickle
 from pathlib import Path
 import numpy as np
@@ -10,7 +11,7 @@ def export_neutral(tmp_path,n=20):
     from dex_frax.v8.anatomy import configure
     from dex_frax.v8 import convert
     r=Robot();cfg=json.loads(Path(convert.__file__).with_name('config.json').read_text());configure(r,cfg['anatomy'])
-    x=np.r_[0.,0.,1.,np.zeros(29)];r.set(x,np.eye(3))
+    x=np.r_[0.,0.,1.,np.zeros(JOINT_COUNT)];r.set(x,np.eye(3))
     repeat=lambda v:np.repeat(np.asarray(v)[None],n,axis=0)
     dg=dict(root_target=repeat(x[:3]),root_r=repeat(np.eye(3)),torso_target=repeat(r.rot(r.torso)),source_expected_contact=np.zeros(n,bool))
     for side,g in r.sides.items():
@@ -52,7 +53,7 @@ def test_relocated_audit_uses_verified_runtime_assets(tmp_path):
     path, payload, meta, _ = export_neutral(tmp_path, n=5)
     original = audit(path, write=False)
     meta['model_sha256'] = sha(meta['model'])
-    meta['model'] = str(tmp_path / 'previous-host/dex_29.xml')
+    meta['model'] = str(tmp_path / 'previous-host/tiangong3_torq.xml')
     path.with_suffix('.json').write_text(json.dumps(meta))
     assets = asset_fingerprints()
     assets['.DS_Store'] = 'legacy-finder-metadata'

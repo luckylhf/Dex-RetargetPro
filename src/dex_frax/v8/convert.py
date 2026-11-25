@@ -11,7 +11,7 @@ from scipy.spatial.transform import Rotation
 from ..contract import DEFAULT_FOOT_CONTACT, DEFAULT_REFINE_FLOW
 from .. import robot_profile
 from .bvh import load
-from .source import adapt
+from .source import adapt, head_relative_target
 from .robot import Robot,DEFAULT_MODEL,DEFAULT_URDF
 from .contacts import prepare
 from .solver import solve,constrain_support as legacy_support
@@ -312,6 +312,7 @@ def convert(bvh,output,source='auto',model=DEFAULT_MODEL,fps=None,config=None,ma
     output.write_bytes(pickle.dumps(payload,protocol=4))
     np.savez_compressed(output.with_suffix('.npz'),**{k:v for k,v in payload.items() if v is not None})
     diagnostics={'root_target':t['root_p'],'root_r':t['root_r'],'torso_target':t['torso_r'],'solver_records':records}
+    diagnostics['head_relative_target'] = head_relative_target(t['torso_r'], t['head_r'])
     diagnostics['source_time_s']=sample_times
     support_stats=getattr(robot,'support_fast_report',None)
     if support_stats is not None:
@@ -349,6 +350,7 @@ def convert(bvh,output,source='auto',model=DEFAULT_MODEL,fps=None,config=None,ma
         'joint_names':robot.names,'quat_order':'xyzw','units':'metres/radians','cpu_only':True,
         'official_reference_commit':'cbdb2b494a2af82137bf9b6f15122d60167281c4','official_runtime':False,
         'prepared_targets_sha256':prepared_targets_sha256,'configuration':cfg,'contacts_enabled':not no_contacts,'source_floor_m':t['floor'],'leg_scale':t['scale'],
+        'head_calibration':t['head_calibration'],
         'ground_calibration':t['ground_calibration'],'multicontact':t['multicontact_record'],
         'body_contact_solver':robot.body_contact_qp_summary,
         'body_contact_task_policy':'bounded extra-body normal cues with existing foot support, linear body support without foot plants; independent hard mesh clearance and foot XYZ constraints',

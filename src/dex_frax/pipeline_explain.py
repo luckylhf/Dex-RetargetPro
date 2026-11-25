@@ -218,7 +218,7 @@ def build_stage(meta=None, quality=None, repair=None, run=None, identity=None, c
         unified_before_after=dict(before=_metrics(repair.get('before')), after=_metrics(repair.get('after'))),
         warnings=warnings, limitations=['只解释已有JSON记录，不重新求解或重新验收',
           '预算耗尽、局部不可行与分支用尽都不证明全局无解',
-          '当前转换实现仍绑定Dex 29关节；报告协议可复用不代表任意机器人已适配',
+          '当前转换目标为 Dex 31 轴模型',
           '运动学/采样几何验收不代表动力学跟踪或真机安全'])
 
 

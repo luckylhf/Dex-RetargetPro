@@ -1,9 +1,11 @@
 {
-  "robot": "tienkung_dex_29",
-  "head": "fixed_at_urdf_zero",
+  "robot": "tienkung_dex_31",
+  "head": "actuated_yaw_pitch",
   "hands": false,
-  "source_urdf_sha256": "29ac0559e7a2a07be471f81be758f67a2e4fbfc994f6778afc0d01140376de5b",
-  "model_sha256": "17573c55d1c9d9d43b2e44a5e3ebc237027bfcfb6f5b5d928aa0205792548194",
+  "source": "Tienkung_Dex_Model_All",
+  "source_revision": "38a57cd9824a7650d2ba3815eef1741c8a172386",
+  "model_sha256": "815076b614f613d84da8cd29ad80021e6af298b142805cddc4bd07f8a7fce7cf",
+  "urdf_sha256": "538ee30dab3c18fe575c1f97e943e02edf37205f9083fd070a6e49833eb0b6c6",
   "joint_names": [
     "hip_pitch_l_joint",
     "hip_roll_l_joint",
@@ -33,7 +35,9 @@
     "elbow_pitch_r_joint",
     "elbow_yaw_r_joint",
     "wrist_pitch_r_joint",
-    "wrist_roll_r_joint"
+    "wrist_roll_r_joint",
+    "head_yaw_joint",
+    "head_pitch_joint"
   ],
   "joint_limits": {
     "hip_pitch_l_joint": {
@@ -209,8 +213,18 @@
       "upper": "1.3264502315156903",
       "effort": "40.0",
       "velocity": "18.325957145940457"
+    },
+    "head_yaw_joint": {
+      "lower": "-1.0471975511965976",
+      "upper": "1.0471975511965976",
+      "effort": "6.3",
+      "velocity": "7.644542123735163"
+    },
+    "head_pitch_joint": {
+      "lower": "-0.8726646259971648",
+      "upper": "0.2617993877991494",
+      "effort": "6.3",
+      "velocity": "7.644542123735163"
     }
-  },
-  "source": "Tienkung_Dex_Model_All/urdf/tiangong3.urdf",
-  "urdf_sha256": "54494933dd9a7fec4ef9f0d00ffa327fc4ada1cfc67f50d2b469215719c3b1a5"
+  }
 }

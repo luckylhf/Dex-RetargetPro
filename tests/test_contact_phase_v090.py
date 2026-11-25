@@ -1,3 +1,4 @@
+from dex_frax.robot_profile import POSE_SIZE
 import numpy as np
 import pytest
 from dex_frax.contact_phase import transition_windows,surface_patch
@@ -5,7 +6,7 @@ from dex_frax.contact_probe import scene_boxes,surface_at
 
 
 def test_root_norm_and_contact_change_route_only_nearby_edges():
-    rows=np.zeros((100,32))
+    rows=np.zeros((100,POSE_SIZE))
     rows[30,0:2]=.12
     rows[70,2]=.35
     phase=np.zeros(100);phase[30:40]=2

@@ -1,9 +1,19 @@
-# Dex 29 关节机器人资产
+# Dex 31 轴机器人资产
 
-本目录随 Git 分发，包含匹配的 `model.json`、`mjcf/dex_29.xml`、`meshes/`、`meshes_visual/`、`meshes_convex/`、`urdf/` 及原始 `LICENSE`。使用前保留原始许可；资产使用 OpenAtom Open Hardware License 1.0，不能用本仓库代码的 MIT 许可替代。
+本目录从 `Tienkung_Dex_Model_All` 导入基础版。原始 URDF、MJCF、网格和 [OpenAtom 许可证](LICENSE) 保留上游内容与相对路径。[model.json](model.json) 记录导入提交、模型哈希、关节限位和导出顺序。
 
-机器人原始资产由 UBTECH 发布。本目录随附的模型包来自 Dex-Video2Robot 的固定快照，包含其整理后的 29 轴 URDF、生成的 MuJoCo 模型和视觉及凸包网格。Dex-RetargetPro 沿用该快照中的模型、网格及许可证。 [UBTECH 原始资产](https://github.com/UBTECH-Robot/Walker_TienKung_DEX_URDF/tree/d172cfb8cdb4961abeda38bb363d555e59db4531) · [Dex-Video2Robot 资产快照](https://github.com/luckylhf/Dex-Video2Robot/tree/cf252a2172344908dfa5ef5901e3d78506bbea6a/Dex-GMR/assets/dex)
+| 用途 | 上游文件或目录 | 转换器映射 |
+| --- | --- | --- |
+| 运动学和额定速度 | `urdf/tiangong3.urdf`、`meshes/` | Frax 直接读取 URDF，按原始关节名排列 |
+| 模型、碰撞网格和执行器 | `mujoco/tiangong3_torq.xml`、`mujoco/meshes_convex/` | MuJoCo 读取原始模型。导出世界的地面平移至 `z=0`，骨盆默认位姿同步平移 |
+| 视觉网格和离线表面 | `mujoco/meshes_simplify/` | 按同名 `*_visual` 几何映射到减面网格，保留转换器使用的表面。模型内的惯性取映射前的上游值 |
+| 脚底碰撞 | 两侧 `ankle_roll_*_link` 各 7 个 `capsule` | 仿真使用胶囊。离线落脚、自碰和场景检测使用脚部视觉网格凸包 |
+| 导出关节顺序 | 原始 31 个活动关节 | 保留原身体 29 列顺序，末尾为 `head_yaw_joint`、`head_pitch_joint` |
 
-- 模型 XML SHA-256：`17573c55d1c9d9d43b2e44a5e3ebc237027bfcfb6f5b5d928aa0205792548194`。
-- `model.json` 的 `model_sha256` / `urdf_sha256` 用于转换、训练、回放和缓存身份校验；模型不匹配时应重新转换、训练和验证，不要只改 JSON 哈希绕过检查。
-- 转换和回放默认使用本目录。若已有完整且经过核验的资产副本，可设置 `DEX_FRAX_ASSETS=/absolute/path/to/assets/dex_evt` 指向该副本。该目录须包含上述模型、网格和许可文件。
+求解器的身体角色映射和具名装配排除在 [robot_profile.py](../../src/dex_frax/robot_profile.py) 中。离线几何映射在 [model_cache.py](../../src/dex_frax/model_cache.py) 中。可用 `DEX_FRAX_ASSETS` 指向按同一布局导入的资产目录。
+
+从已检出的上游工作树重新导入：
+
+```sh
+python assets/dex_evt/tools/build_assets.py --source /path/to/Tienkung_Dex_Model_All
+```

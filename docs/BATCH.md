@@ -25,11 +25,11 @@ dex-frax batch manifest.json outputs/batch-refine \
   --mode refine --workers auto
 ```
 
-`--budget` 是批次总时限。`--repair-budget` 覆盖每条动作的默认精修时限，也就是整条输入按 50 Hz 换算的总帧数 × 0.5 秒。各路线启用的精修阶段共用该截止时间。专项单次求解最多 20 秒，B 和 C 的 V8 单段求解最多 50 秒，提前完成即继续派发。耗尽时保留已采用结果和待处理记录，随后独立终验。并发受内存和磁盘准入限制，可通过 `--disk-reserve-gib` 配置磁盘保留量，默认 80 GiB。
+`--budget` 是批次总时限。`--repair-budget` 覆盖每条动作的默认精修时限，也就是整条输入按 50 Hz 换算的总帧数 × 0.5 秒。各精修阶段共用该时限，单次专项求解最多 20 秒。精修时限耗尽时保留已采用结果和待处理记录，随后独立终验。并发受内存和磁盘准入限制，磁盘保留量由 `--disk-reserve-gib` 配置，默认 80 GiB。
 
 批处理也可指定 `--repair-budget unlimited`，取消每条动作的精修总时限。批次总时限 `--budget`（默认 1,800 秒）和显式指定的 `--frax-timeout` 仍会限制实际运行时间。
 
-批处理省略 `--refine-flow` 时使用 A 基线，按专项顺序轮转。测试 B 时传 `--mode refine --refine-flow B`，采用前置落地、专项和 V8 交替、最后时序修复。测试 C 时传 `--mode refine --refine-flow C`，按支撑相位和重叠窗口联解。对比时保持清单、初解选项和预算一致，各写入新的输出目录。续跑 B 或 C 批次时显式传入原路线。 [精修流程对照](../README.md#精修流程-abc)
+默认精修路线为 A，按专项轮转。 [转换流程](PIPELINE.md)
 
 `--segmented` 把已校验的 Frax 初解落盘后交给单独的精修进程。`--capacity-scheduler` 可按 CPU 和内存预算派发初解和精修任务。用 `dex-frax batch --help` 查看资源配置参数。
 

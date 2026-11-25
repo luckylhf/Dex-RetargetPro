@@ -58,7 +58,8 @@ def probe(folder,start,frames,initial_from=None,scene=None):
             or len(initial['root_pos'])!=len(ref['root_pos']) or list(ref['joint_names'])!=robot.names
             or list(initial['joint_names'])!=robot.names):raise ValueError('References must have the same source, axes and timeline')
     boxes=scene_boxes(scene)
-    spec=mujoco.MjSpec.from_file(DEFAULT_MODEL)
+    from .model_cache import model_spec
+    spec=model_spec(DEFAULT_MODEL)
     for box in boxes:
         spec.worldbody.add_geom(name='scene_'+box['id'],type=mujoco.mjtGeom.mjGEOM_BOX,
                                 pos=box['center_m'],size=box['half_size_m'],contype=1,conaffinity=1)

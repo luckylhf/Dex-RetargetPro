@@ -5,7 +5,7 @@
   "quality_policy": "scoped_collision_support_temporal_v10",
   "default_mode": "fast",
   "default_refine_flow": "A",
-  "robot": "tienkung_dex_29",
+  "robot": "tienkung_dex_31",
   "window_budget_s": 50,
   "default_repair_seconds_per_frame": 0.5,
   "default_repair_frame_basis": "full_input_at_50hz",

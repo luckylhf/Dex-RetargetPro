@@ -3,6 +3,7 @@
 No per-clip window cap. Each finite candidate family gets a fair visit. Safe
 adoptions persist immediately; a user budget leaves a resumable pending queue.
 """
+from .robot_profile import POSE_SIZE
 import copy
 import json
 import os
@@ -144,14 +145,14 @@ def guard(robot,t,before,after,original,old_m,new_m,old_q,new_q,old_cache,new_ca
     if joint:
         from .hand_leg_repair import columns,owned_pairs
         allowed,_,_=columns(model,job['hand_leg_pair_ids'],joint=='cooperate')
-        fixed=np.setdiff1d(np.arange(32),allowed)
+        fixed=np.setdiff1d(np.arange(POSE_SIZE),allowed)
         if not np.array_equal(before[:,fixed],after[:,fixed]):return 'hand_leg_changed_protected_joint'
         arm_ids=sum([g['arm'][:3] for g in robot.sides.values()],[])
         if np.any(abs(after[a:b,arm_ids]-original[a:b,arm_ids])>np.deg2rad(30.)+2e-6):return 'fixed_reference_shoulder_cap'
     elif job.get('surface_support_pose'):
         from .contact_phase import support_errors
         g=robot.sides[job['side']]
-        fixed=np.setdiff1d(np.arange(32),[0,1,2]+sum([s['leg'] for s in robot.sides.values()],[])+g['arm'])
+        fixed=np.setdiff1d(np.arange(POSE_SIZE),[0,1,2]+sum([s['leg'] for s in robot.sides.values()],[])+g['arm'])
         if not np.array_equal(before[:,fixed],after[:,fixed]):return 'protected_body_changed'
         if np.any(abs(after[a:b,:2]-before[a:b,:2])>.065001):return 'root_corridor'
         prior,limit=support_errors(robot,t,before[a:b],a)
@@ -162,11 +163,11 @@ def guard(robot,t,before,after,original,old_m,new_m,old_q,new_q,old_cache,new_ca
         if np.any(new_speed>np.maximum(root_speed_bounds(t['root_p'][lo:hi],t['fps']),old_speed)+1e-5):return 'root_speed'
     elif stage in ('arms','collision'):
         sides=[job['side']] if job['side'] else list(robot.sides)
-        fixed=np.setdiff1d(np.arange(32),sum([robot.sides[s]['arm'] for s in sides],[]))
+        fixed=np.setdiff1d(np.arange(POSE_SIZE),sum([robot.sides[s]['arm'] for s in sides],[]))
         if not np.array_equal(before[:,fixed],after[:,fixed]):return 'protected_body_changed'
     if not pelvis and not job.get('surface_support_pose') and not np.array_equal(before[:,:2],after[:,:2]):return 'pelvis_horizontal_changed'
     if stage=='leg_pose':
-        fixed=np.setdiff1d(np.arange(32),robot.sides[job['side']]['leg'])
+        fixed=np.setdiff1d(np.arange(POSE_SIZE),robot.sides[job['side']]['leg'])
         if not np.array_equal(before[:,fixed],after[:,fixed]):return 'leg_pose_changed_protected_joint'
     if job.get('source_pose_guard'):
         for side in robot.sides:
@@ -175,7 +176,7 @@ def guard(robot,t,before,after,original,old_m,new_m,old_q,new_q,old_cache,new_ca
             updated=new_m['legs'][side][a:b]
             if (updated>np.maximum(previous,25.)+3.).any():return 'source_leg_direction_regression'
     if stage=='leg_collision' and not joint:
-        fixed=np.setdiff1d(np.arange(32),[2]+sum([g['leg'] for g in robot.sides.values()],[]))
+        fixed=np.setdiff1d(np.arange(POSE_SIZE),[2]+sum([g['leg'] for g in robot.sides.values()],[]))
         if not np.array_equal(before[:,fixed],after[:,fixed]):return 'leg_repair_changed_upper_body'
     if stage in ('collision','torso'):
         for g in robot.sides.values():
@@ -188,7 +189,7 @@ def guard(robot,t,before,after,original,old_m,new_m,old_q,new_q,old_cache,new_ca
     if joint:
         # Source-relative envelope, not a ratchet against each incidental gain.
         from .palm_constraints import SourcePalms
-        palms=SourcePalms(robot,t,original,a,b,list(robot.sides),np.arange(32))
+        palms=SourcePalms(robot,t,original,a,b,list(robot.sides),np.arange(POSE_SIZE))
         reason='palm_absolute_envelope' if any(palms.evaluate(after[i],i-a)[2]>np.deg2rad(.001) for i in range(a,b)) else None
     else:
         reason=palm_envelope({s:{k:v[a:b] for k,v in e.items()} for s,e in old_m['errors'].items()},

@@ -1,3 +1,4 @@
+from dex_frax.robot_profile import JOINT_COUNT, POSE_SIZE
 import numpy as np
 from dex_frax.swept_height import distribute
 
@@ -17,7 +18,7 @@ def test_stance_fit_preserves_other_leg_waist_arms_and_both_velocity_seams():
     from dex_frax.foot_transition import landing_fit
     from dex_frax.v8.robot import Robot
     r=Robot();g=r.sides['Left']
-    pose=np.r_[0.,0.,1.,np.zeros(29)]
+    pose=np.r_[0.,0.,1.,np.zeros(JOINT_COUNT)]
     pose[g['leg'][0]]=-.35;pose[g['leg'][3]]=.65
     r.set(pose,np.eye(3))
     pose[2]-=r.point(g['foot'],r.lowest('Left'))[2]
@@ -29,7 +30,7 @@ def test_stance_fit_preserves_other_leg_waist_arms_and_both_velocity_seams():
                   'Right':dict(contact=np.zeros(3))})
     config=dict(numerical_joint_speed_deg_s=120.)
     result=landing_fit(r,t,rows,1,pose[2]+.001,pose,config)
-    protected=np.setdiff1d(np.arange(32),[0,1,2]+g['leg'])
+    protected=np.setdiff1d(np.arange(POSE_SIZE),[0,1,2]+g['leg'])
     np.testing.assert_array_equal(result[protected],pose[protected])
     for other in (rows[0],rows[2]):
         assert np.all(abs(result[3:]-other[3:])<=r.joint_step(50.,config)+1e-8)
@@ -45,7 +46,7 @@ def test_jitter_fit_constrains_slip_between_individually_valid_anchors():
     robot = Robot()
     foot = robot.sides['Left']
     rotation = np.eye(3)
-    pose = np.r_[0., 0., 1., np.zeros(29)]
+    pose = np.r_[0., 0., 1., np.zeros(JOINT_COUNT)]
     robot.set(pose, rotation)
     pose[2] -= robot.point(foot['foot'], robot.lowest('Left'))[2]
     robot.set(pose, rotation)

@@ -4,6 +4,7 @@ SOMA's geometric limb stabilizer supplies an optional two-link warm start,
 never motor commands. A small differential IK QP uses the real Dex Jacobian.
 The original SLSQP remains the fallback. No velocity or geometry limit changes.
 """
+from ..robot_profile import POSE_SIZE
 import time
 import numpy as np
 from .support_acceptance import support_constraint_failed
@@ -66,7 +67,7 @@ so function-value stopping tests retain the original meaning.
         def direction(a,b,target,weight):
             p,P=point(a);q,Q=point(b);d=q-p;length=np.linalg.norm(d);u=d/length
             add(u-target,(np.eye(3)-np.outer(u,u))@(Q-P)/length,weight)
-        rootJ=np.eye(32)[:3,ids]
+        rootJ=np.eye(POSE_SIZE)[:3,ids]
         add(x[:3]-t['root_p'][i],rootJ,w['root_position'])
         for side,v in t['sides'].items():
             g=r.sides[side];b=g['foot']

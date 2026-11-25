@@ -1,4 +1,5 @@
 """Bounded whole-body contact refinement with small sequential sparse QPs."""
+from ..robot_profile import JOINT_COUNT, POSE_SIZE
 import numpy as np
 from .support_acceptance import support_constraint_failed
 import warnings
@@ -102,33 +103,33 @@ def refine(robot,t,xs,cfg,progress=None,objective_factory=None):
                 ids=np.argsort(z)[:4]
                 for local in g['hull'][ids]:
                     P,_=robot.jac(b,local);values.append(robot.point(b,local)[2]);rows.append(P[2])
-            return np.asarray(values),np.asarray(rows).reshape(-1,32)
+            return np.asarray(values),np.asarray(rows).reshape(-1,POSE_SIZE)
         def foot_constraints(at):
             robot.set(at,t['root_r'][i]);v=[];rows=[]
             for s,c in contacts.items():
                 b=robot.sides[s]['foot'];local=c['pivots'][i];P,_=robot.jac(b,local)
                 v.extend((robot.point(b,local)-c['anchors'][i])[:2]);rows.extend(P[:2])
                 local=lowest(robot,b);P,_=robot.jac(b,local);v.append(robot.point(b,local)[2]);rows.append(P[2])
-            return np.asarray(v),np.asarray(rows).reshape(-1,32)
+            return np.asarray(v),np.asarray(rows).reshape(-1,POSE_SIZE)
         def merit(at):
             res,J=obj.evaluate(at);z,G=geometry(at)
             return float(res@res)+1e6*float(np.minimum(z,0)@np.minimum(z,0)),res,J,z,G
         value,res,J,z,G=merit(x)
         for iteration in range(14):
-            P=csc_matrix(J.T@J)+eye(32,format='csc')*.01;gradient=J.T@res
-            trust=np.r_[np.full(3,max(.05,-float(z.min())+.01) if len(z) else .05),np.full(29,.25)]
+            P=csc_matrix(J.T@J)+eye(POSE_SIZE,format='csc')*.01;gradient=J.T@res
+            trust=np.r_[np.full(3,max(.05,-float(z.min())+.01) if len(z) else .05),np.full(JOINT_COUNT,.25)]
             lb=np.maximum(lo-x,-trust);ub=np.minimum(hi-x,trust)
-            A=vstack([eye(32,format='csc'),csc_matrix(G)],format='csc')
+            A=vstack([eye(POSE_SIZE,format='csc'),csc_matrix(G)],format='csc')
             # A planted sole is exactly on z=0. A positive clearance margin
             # here would contradict its hard zero-height equality.
             lower=np.r_[lb,-z];upper=np.r_[ub,np.full(len(z),np.inf)]
             fv,F=foot_constraints(x)
             if contacts and not foot_relaxed:
                 Ac=vstack([A,csc_matrix(F)],format='csc');lc=np.r_[lower,-fv];uc=np.r_[upper,-fv]
-                try:delta,_=qp(P,gradient,Ac,lc,uc,np.zeros(32))
+                try:delta,_=qp(P,gradient,Ac,lc,uc,np.zeros(POSE_SIZE))
                 except ValueError:
-                    foot_relaxed=True;delta,_=qp(P,gradient,A,lower,upper,np.zeros(32))
-            else:delta,_=qp(P,gradient,A,lower,upper,np.zeros(32))
+                    foot_relaxed=True;delta,_=qp(P,gradient,A,lower,upper,np.zeros(POSE_SIZE))
+            else:delta,_=qp(P,gradient,A,lower,upper,np.zeros(POSE_SIZE))
             accepted=False
             for alpha in (1.,.5,.25,.125):
                 proposal=np.clip(x+alpha*delta,lo,hi)
@@ -148,12 +149,12 @@ def refine(robot,t,xs,cfg,progress=None,objective_factory=None):
         for cleanup in range(5):
             z,G=geometry(x)
             if not len(z) or z.min()>=-1e-5:break
-            A=vstack([eye(32,format='csc'),csc_matrix(G)],format='csc')
+            A=vstack([eye(POSE_SIZE,format='csc'),csc_matrix(G)],format='csc')
             lb=np.r_[lo-x,-z];ub=np.r_[hi-x,np.full(len(z),np.inf)]
             fv,F=foot_constraints(x)
             if contacts:
                 A=vstack([A,csc_matrix(F)],format='csc');lb=np.r_[lb,-fv];ub=np.r_[ub,-fv]
-            try:delta,_=qp(eye(32,format='csc'),np.zeros(32),A,lb,ub,np.zeros(32))
+            try:delta,_=qp(eye(POSE_SIZE,format='csc'),np.zeros(POSE_SIZE),A,lb,ub,np.zeros(POSE_SIZE))
             except ValueError:break
             proposal=np.clip(x+delta,lo,hi);newz,_=geometry(proposal)
             if len(newz) and newz.min()>z.min()+1e-8:x=proposal

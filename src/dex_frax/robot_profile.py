@@ -3,10 +3,10 @@
 from math import isfinite
 from typing import NamedTuple
 
-ROBOT_ID = 'tienkung_dex_29'
+ROBOT_ID = 'tienkung_dex_31'
 ASSET_DIRECTORY = 'assets/dex_evt'
-MODEL_XML = 'mjcf/dex_29.xml'
-MODEL_URDF = 'urdf/dex_29.urdf'
+MODEL_XML = 'mujoco/tiangong3_torq.xml'
+MODEL_URDF = 'urdf/tiangong3.urdf'
 MODEL_MANIFEST = 'model.json'
 VELOCITY_SOURCE = 'URDF joint limit velocity, cross-checked against model.json'
 LINEAR_SPEED_BASIS = (
@@ -37,7 +37,8 @@ ROOT_SPEED_ALLOWANCE_STEP_M = .035
 
 PELVIS_BODY = 'pelvis'
 TORSO_BODY = 'waist_pitch_link'
-HEAD_BODY = 'head_yaw_link'
+HEAD_BODY = 'head_pitch_link'
+HEAD_JOINTS = ('head_yaw_joint', 'head_pitch_joint')
 TORSO_SUPPORT_BODIES = (TORSO_BODY, 'camera_body_front_link', 'imu_waist_link')
 WAIST_JOINTS = ('waist_yaw_joint', 'waist_roll_joint', 'waist_pitch_joint')
 WAIST_MEASUREMENT = 'shoulder_pitch_midpoint'
@@ -114,9 +115,13 @@ JOINT_SPEED_LIMITS = {
     'elbow_yaw_r_joint': JointMotionLimit(18.325957145940457, 0.000000, 1.942551, 'Right_tcp'),
     'wrist_pitch_r_joint': JointMotionLimit(18.325957145940457, 1.942551, 1.942551, 'Right_tcp'),
     'wrist_roll_r_joint': JointMotionLimit(18.325957145940457, 0.806342, 0.806342, 'Right_tcp'),
+    'head_yaw_joint': JointMotionLimit(7.644542123735163, 0.490038, 0.563386, 'head_visual_center'),
+    'head_pitch_joint': JointMotionLimit(7.644542123735163, 0.036674, 0.036674, 'head_visual_center'),
 }
 JOINT_ORDER = (*SIDE_LAYOUT['Left']['leg'], *SIDE_LAYOUT['Right']['leg'], *WAIST_JOINTS,
-               *SIDE_LAYOUT['Left']['arm'], *SIDE_LAYOUT['Right']['arm'])
+               *SIDE_LAYOUT['Left']['arm'], *SIDE_LAYOUT['Right']['arm'], *HEAD_JOINTS)
+JOINT_COUNT = len(JOINT_ORDER)
+POSE_SIZE = 3 + JOINT_COUNT
 
 
 def joint_angular_limits(names, manifest=None):
@@ -155,7 +160,11 @@ ELBOW_FLEXION_AXIS = (0., -1., 0.)
 ELBOW_BEND_SIGN = -1.
 
 # Collision names describe this asset's assembly and mesh conventions.
-ASSEMBLY_COLLISION_EXCLUSIONS = (('pelvis_collision', 'waist_roll_link_collision'),)
+ASSEMBLY_COLLISION_EXCLUSIONS = {
+    frozenset(('pelvis_collision', 'waist_roll_link_collision')): 'pelvis/waist nested gimbal housing',
+    frozenset(('waist_pitch_link_collision', 'head_pitch_link_collision')): 'neck mount inside torso convex envelope',
+    frozenset(('waist_pitch_link_collision', 'camera_head_link_collision')): 'head camera mount inside torso convex envelope',
+}
 COLLISION_SUFFIX = '_collision'
 COLLISION_TORSO_EXCLUDED_STEMS = ('shoulder', 'ankle', 'knee')
 
