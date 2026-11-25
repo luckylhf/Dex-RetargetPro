@@ -8,13 +8,14 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 from conftest import synthetic_mocap
-from dex_frax.ik import FraxIK
+from dex_frax.ik import FraxIK, targets as ik_targets
 from dex_frax.robot_profile import HEAD_JOINTS, JOINT_COUNT
 from dex_frax.scene_support import audit_scene
 from dex_frax.v8 import convert
 from dex_frax.v8.robot import Robot
 from dex_frax.v8.self_collision import CollisionModel, scan
-from dex_frax.v8.source import head_relative_target
+from dex_frax.v8.solver import Objective
+from dex_frax.v8.source import head_relative_target, limit_head_target
 
 
 def test_head_yaw_pitch_follow_bvh_and_ignore_whole_body_yaw():
@@ -48,6 +49,39 @@ def test_head_yaw_pitch_follow_bvh_and_ignore_whole_body_yaw():
     np.testing.assert_allclose(rows[:, -2:], expected, atol=np.deg2rad(2.))
     assert np.all(np.max(abs(np.diff(rows[:, -2:], axis=0)), axis=0) * targets['fps']
                   <= robot.speed_limits[-2:] + 1e-5)
+
+
+def test_initial_and_window_solvers_use_asymmetric_head_limits():
+    robot = Robot()
+    requested = [[-75., 25.], [70., -65.], [12., -20.], [60., 15.]]
+    expected = [[-60., 15.], [60., -50.], [12., -20.], [60., 15.]]
+    relative = Rotation.from_euler('ZY', requested, degrees=True).as_matrix()
+    bounded, saturated = limit_head_target(robot, relative)
+    expected_matrices = Rotation.from_euler('ZY', expected, degrees=True).as_matrix()
+    np.testing.assert_allclose(bounded, expected_matrices, atol=1e-12)
+    np.testing.assert_array_equal(saturated, [[True, True], [True, True], [False, False], [False, False]])
+
+    config = json.loads((convert.ROOT / 'config.json').read_text())
+    prepared = convert.prepare(convert.adapt(synthetic_mocap(), 'mocap'), robot, config['contact'])
+    prepared['head_r'][:4] = prepared['torso_r'][:4] @ relative
+    np.testing.assert_allclose(ik_targets(prepared, robot)['head_relative_r'][:4], expected_matrices, atol=1e-12)
+    for frame, matrix in enumerate(expected_matrices):
+        objective = Objective(robot, prepared, frame, config['solver'])
+        np.testing.assert_allclose(objective.head_target, matrix, atol=1e-12)
+
+
+def test_candidate_export_clamps_only_finite_head_joints():
+    robot = Robot()
+    rows = np.tile(np.linspace(-.6, .6, 3 + JOINT_COUNT), (3, 1))
+    head = 3 + robot.head_joints
+    rows[:, head] = np.deg2rad([[-82., 31.], [71., -72.], [np.inf, np.nan]])
+    stored = robot.export_rows(rows)
+    rounded = rows.astype(np.float32)
+    np.testing.assert_array_equal(stored[:, :head[0]], rounded[:, :head[0]])
+    np.testing.assert_array_equal(stored[2, head], rounded[2, head])
+    np.testing.assert_allclose(np.rad2deg(stored[:2, head]), [[-60., 15.], [60., -50.]], atol=1e-5)
+    assert (stored[:2, head] >= robot.lower[head]).all()
+    assert (stored[:2, head] <= robot.upper[head]).all()
 
 
 def test_neck_overlap_is_excluded_and_head_hand_penetration_is_reported():

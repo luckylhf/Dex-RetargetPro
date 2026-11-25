@@ -310,13 +310,17 @@ def final_candidate(path, meta, quality, solve, mode, context=None, *, deadline=
             quat = actual_r.as_quat().astype(np.float32)
             exact = index == np.rint(index)
             quat[exact] = payload['root_rot']
-            payload.update(root_pos=fitted[:,:3].astype(np.float32),dof_pos=fitted[:,3:].astype(np.float32),root_rot=quat,
+            stored = robot.export_rows(fitted)
+            payload.update(root_pos=stored[:,:3].copy(),dof_pos=stored[:,3:].copy(),root_rot=quat,
                            source_time_s=next_source,source_frame_float=next_source*source_fps,source_fps=source_fps)
             blob.write_bytes(pickle.dumps(payload,protocol=4))
             np.savez_compressed(blob.with_suffix('.npz'),**{k:v for k,v in payload.items() if v is not None})
             with np.load(path.with_suffix('.diagnostics.npz'),allow_pickle=False) as loaded:
                 diagnostics = {k:loaded[k] for k in loaded.files}
             nearest = _retime_diagnostics(diagnostics,index,len(q))
+            if 'head_r' in sampled:
+                from .v8.source import head_relative_target
+                diagnostics['head_relative_target'] = head_relative_target(sampled['torso_r'], sampled['head_r'])
             for side, values in sampled['sides'].items():
                 for key in values:
                     name = side+'_'+key
@@ -384,7 +388,8 @@ def final_candidate(path, meta, quality, solve, mode, context=None, *, deadline=
                 # Preserving the original piecewise path is a useful second
                 # candidate when new-sample IK moves a foot or loses clearance.
                 attempt['ik_rejection'] = reason
-                data = dict(payload,root_pos=linear[:,:3].astype(np.float32),dof_pos=linear[:,3:].astype(np.float32))
+                stored = robot.export_rows(linear)
+                data = dict(payload,root_pos=stored[:,:3].copy(),dof_pos=stored[:,3:].copy())
                 blob.write_bytes(pickle.dumps(data,protocol=4))
                 np.savez_compressed(blob.with_suffix('.npz'),**{k:v for k,v in data.items() if v is not None})
                 next_meta['output_sha256'] = sha(blob)

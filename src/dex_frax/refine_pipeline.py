@@ -521,6 +521,8 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
             phase('local_repair')
     path=Path(path);started=time.monotonic();cache={}
     resume_state=None
+    saved_bytes=None
+    saved=payload
     if continue_from is not None and (Path(continue_from)/'refine_state.json').exists():
         previous=Path(continue_from)
         resume_state=json.loads((previous/'refine_state.json').read_text())
@@ -529,8 +531,16 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
         if resume_recheck:
             resume_state['states']={}
             atomic_json(path.parent/'recheck_provenance.json',dict(previous=str(previous),previous_identity_sha256=sha(previous/'identity.json'),previous_motion_sha256=sha(previous/'motion.pkl'),policy='preserve motion and fixed reference; fresh audit and queue'))
-        path.write_bytes(artifact(previous,resume_state,'motion.pkl').read_bytes())
-        saved=pickle.loads(path.read_bytes())
+        saved_bytes=artifact(previous,resume_state,'motion.pkl').read_bytes()
+        saved=pickle.loads(saved_bytes)
+    head_clipped=robot.clip_head_angles(saved['dof_pos'])
+    if head_clipped and resume_state is not None:
+        resume_state['states']={}
+        resume_recheck=True
+    if resume_state is not None or head_clipped:
+        staged=path.with_suffix('.pkl.tmp')
+        staged.write_bytes(pickle.dumps(saved,protocol=4) if head_clipped else saved_bytes)
+        staged.replace(path)
         np.savez_compressed(path.with_suffix('.npz'),**{k:v for k,v in saved.items() if v is not None})
         meta['output_sha256']=sha(path);atomic_json(path.with_suffix('.json'),meta)
     quality=evaluate(path,meta,solve,'frax',cache=cache);before=copy.deepcopy(quality)
@@ -574,6 +584,7 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
     if resume_state is not None:
         shutil.rmtree(baseline);shutil.copytree(previous/'frax_baseline',baseline)
         original_data=pickle.loads((baseline/'motion.pkl').read_bytes())
+        robot.clip_head_angles(original_data['dof_pos'])
         original=np.c_[original_data['root_pos'],original_data['dof_pos']].astype(float)
         out=np.c_[saved['root_pos'],saved['dof_pos']].astype(float)
         before=json.loads((baseline/'quality.json').read_text())
@@ -596,6 +607,7 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
         unfixed_waist=np.asarray(resume_state['unfixed_waist'],bool)
         if unfixed_waist.shape!=(len(out),):raise ValueError('Invalid waist reference mask')
         if reference.shape!=original.shape or not np.isfinite(reference).all():raise ValueError('Invalid avoidance reference')
+        robot.clip_head_angles(reference[:, 3:])
     reference_path=path.parent/'avoidance_reference.npy'
     np.save(reference_path,reference,allow_pickle=False)
     weights=meta['configuration']['solver'];current=measurements(cache,robot)
@@ -837,16 +849,17 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
             shutil.copyfile(path.with_suffix('.diagnostics.npz'),trial.with_suffix('.diagnostics.npz'))
             def commit_temporal(temporal):
                 nonlocal payload,out,quality,cache,current,kept
-                changed=np.flatnonzero(np.any(temporal.rows!=out,axis=1)|
+                rows=robot.export_rows(temporal.rows).astype(float)
+                changed=np.flatnonzero(np.any(rows!=out,axis=1)|
                                        np.any(temporal.quaternions!=payload['root_rot'],axis=1))
                 result=dict(changed_frames=int(len(changed)),kept=False)
                 if not len(changed):
                     return result
-                if not (np.array_equal(temporal.rows[airborne],out[airborne]) and
+                if not (np.array_equal(rows[airborne],out[airborne]) and
                         np.array_equal(temporal.quaternions[airborne],payload['root_rot'][airborne])):
                     raise RuntimeError('Temporal proposal changed protected airborne frames')
-                data=dict(payload,root_pos=temporal.rows[:,:3].astype(np.float32),
-                          dof_pos=temporal.rows[:,3:].astype(np.float32),root_rot=temporal.quaternions)
+                data=dict(payload,root_pos=rows[:,:3].astype(np.float32),
+                          dof_pos=rows[:,3:].astype(np.float32),root_rot=temporal.quaternions)
                 trial.write_bytes(pickle.dumps(data,protocol=4))
                 description=dict(meta,output_sha256=sha(trial));atomic_json(trial.with_suffix('.json'),description)
                 trial_cache=fork(cache)
@@ -858,7 +871,7 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
                 if reason is not None:
                     result['reason']=reason
                     return result
-                payload,out,quality,cache=data,temporal.rows,proposed,trial_cache
+                payload,out,quality,cache=data,rows,proposed,trial_cache
                 current=measurements(cache,robot)
                 t['root_r']=temporal.rotations
                 temp=path.with_suffix('.pkl.tmp');temp.write_bytes(trial.read_bytes());temp.replace(path)
@@ -1066,7 +1079,7 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
                         candidate = smooth_lift_correction(t,out,candidate,lo,hi)
                         if time.monotonic() >= local_deadline:
                             raise TimeoutError('ground_settle_candidate_deadline')
-                        candidate=candidate.astype(np.float32).astype(float)
+                        candidate=robot.export_rows(candidate).astype(float)
                         supports=gs.support_report(gs.support_measurements(robot,t,candidate,a,b))
                         result=dict(method=method,supports=supports)
                         job['trials'].append(result)
@@ -1162,7 +1175,7 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
                 aligned=detail.pop('_aligned_reference',None) if isinstance(detail,dict) else None
                 rotation=detail.pop('_pelvis_rotations',None) if recipe==PELVIS_CONTACT else None
                 entry['detail']=detail
-                candidate=candidate.astype(np.float32).astype(float)
+                candidate=robot.export_rows(candidate).astype(float)
                 # Preserve the complete in-flight pose against all repair stages.
                 constrained_fit = (job['module'] in ('leg_pose','support','dense_floor','leg_collision','jitter')
                                    or job['module']=='arms' and recipe in ('fit','current_best','original_frax',

@@ -132,7 +132,7 @@ def recover(robot, targets, model, payload, path, trial, meta, quality, cache, s
                 replacement, lift = rebuild(robot, rows, rotations, floor, a, b, index)
                 if time.monotonic() >= cutoff:
                     raise TimeoutError('inserted_frame_deadline')
-                candidate[a:b] = replacement.astype(np.float32)
+                candidate[a:b] = robot.export_rows(replacement)
                 if np.array_equal(candidate[a:b], rows[a:b]):
                     raise ValueError('unchanged_inserted_pose')
                 joints = candidate[a:b, 3:]

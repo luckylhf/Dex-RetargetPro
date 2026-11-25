@@ -109,13 +109,15 @@ class FrameBounds(InequalityConstraint):
 
 
 def targets(t, robot=None):
-    from .v8.source import head_relative_target
+    from .v8.source import head_relative_target, limit_head_target
 
     keys = ("thigh", "shin", "foot_target_p", "foot_target_r", "contact", "pivots", "anchors",
             "upper", "lower", "hand_forward", "hand_width", "forearm_width", "elbow_axis",
             "signed_elbow_bend", "ground_contact_confidence")
     out = {k: np.asarray(t[k]) for k in ("root_p", "root_r", "torso_r")}
     out['head_relative_r'] = head_relative_target(out['torso_r'], t.get('head_r', out['torso_r']))
+    if robot is not None:
+        out['head_relative_r'], _ = limit_head_target(robot, out['head_relative_r'])
     out['body_tolerance'] = np.full(len(t['hips']),float(t['body_contact_height_tolerance_m']))
     if 'priority_pose' in t:
         out['priority_pose']=np.asarray(t['priority_pose'])

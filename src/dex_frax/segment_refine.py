@@ -380,7 +380,7 @@ def refine(robot, targets, meta, payload, path, initial_solver, budget, *,
                 writable = slice(lo-read_lo,hi-read_lo)
                 candidate=blend(out,solved[writable],lo,hi,job['core_start'],job['core_end'],~fixed_frames[writable])
                 project_joints(candidate[read_lo:read_hi],anchors)
-                candidate=candidate.astype(np.float32).astype(float)
+                candidate=robot.export_rows(candidate).astype(float)
                 if np.array_equal(candidate,out):
                     raise ValueError('unchanged_candidate')
                 data,cached,check=audit(candidate,payload['root_rot'],changed,trial)
@@ -401,7 +401,7 @@ def refine(robot, targets, meta, payload, path, initial_solver, budget, *,
                             record['post_plugin']['solve_elapsed_s'] = time.monotonic() - plugin_start
                         if time.monotonic() >= plugin_deadline:
                             raise TimeoutError('post_plugin_deadline')
-                        repaired=repaired.astype(np.float32).astype(float)
+                        repaired=robot.export_rows(repaired).astype(float)
                         # The body-support plugin returns per-frame records.
                         # Only plugins returning a mapping can carry rotations.
                         rr=detail.get('_pelvis_rotations') if isinstance(detail,dict) else None

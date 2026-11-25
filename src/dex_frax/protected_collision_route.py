@@ -114,9 +114,9 @@ def attempt(robot, targets, model, rows, payload, quality, cache, job, path, tri
                  before=counts(quality))
     candidate, detail = propose(robot, targets, rows, model, a, b, deadline, protected=airborne)
     entry['detail'] = detail
-    candidate = candidate.astype(np.float32).astype(float)
     if candidate.shape != rows.shape or not np.isfinite(candidate).all():
         return dict(entry, reason='invalid_candidate_rows'), None
+    candidate = robot.export_rows(candidate).astype(float)
     if (not np.array_equal(candidate[:a+1], rows[:a+1]) or
             not np.array_equal(candidate[b-1:], rows[b-1:]) or
             not np.array_equal(candidate[airborne], rows[airborne]) or

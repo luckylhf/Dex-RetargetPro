@@ -177,6 +177,8 @@ class Repair:
                         return
                     rows = self.rows.copy()
                     rows[ds,j] = (original[ds]+strength*(curve-original[ds])).astype(np.float32)
+                    if j-3 in self.robot.head_joints:
+                        rows[ds] = self.robot.export_rows(rows[ds])
                     if np.any(rows[ds,j] < self.robot.lower[j]) or np.any(rows[ds,j] > self.robot.upper[j]):
                         continue
                     after = self.temporal(rows,start,end)

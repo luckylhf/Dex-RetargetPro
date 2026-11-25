@@ -45,7 +45,7 @@ dex-frax convert /path/to/input.pt outputs/smplx_refine \
 
 ## 头部动作
 
-头部 yaw、pitch 跟踪人体头部相对躯干的朝向。导出关节名末两列为 `head_yaw_joint` 和 `head_pitch_joint`，两轴使用上游 URDF 的角度与速度限位。BVH 缺失头部关节时，头部目标取躯干相对零位。跟踪误差和校准来源见 `frax/quality.json` 的 `head_tracking`。
+头部 yaw、pitch 跟踪人体头部相对躯干的朝向，导出关节名末两列为 `head_yaw_joint` 和 `head_pitch_joint`。源目标超出可达角度时，在机器人限位内尽量跟踪，触限饱和不报错。BVH 缺失头部关节时，头部目标取躯干相对零位。跟踪差异和校准来源见 `frax/quality.json` 的 `head_tracking`。 [头部硬限位规则](docs/SAFETY_REPAIR_RULES.md#头部硬限位)
 
 ## 脚部几何与碰撞检查
 

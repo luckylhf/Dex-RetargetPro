@@ -29,7 +29,7 @@ def finish(engine, weights, nominal_deadline, *, candidate_seconds):
             local_deadline = min(nominal_deadline, time.monotonic() + candidate_seconds)
             proposal,_=propose(engine.robot,targets,engine.rows,engine.rows,weights,engine.model,
                                job,'temporal_more',local_deadline,{})
-            proposal=proposal.astype(np.float32).astype(float)
+            proposal=engine.robot.export_rows(proposal).astype(float)
             proposal[engine.air]=engine.rows[engine.air]
             new=engine.temporal(proposal,lo,hi)
             gain=len(new['joints'][side]['violating_frames'])<len(old['joints'][side]['violating_frames'])

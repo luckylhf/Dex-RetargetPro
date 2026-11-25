@@ -10,6 +10,7 @@ from .math3d import unit
 from .anatomy import configure
 from .review import local_windows
 from .multicontact import lowest,contact_local
+from .source import limit_head_target
 
 def stats(a):
     a=np.asarray(a)
@@ -87,6 +88,10 @@ def audit(path,write=True,cache=None,changed=None):
     flat_tilt=values['flat_tilt'];flat_heel=values['flat_heel']
     root_orientation=values['root_orientation'];torso_orientation=values['torso_orientation'];torso_up=values['torso_up']
     head_orientation=values['head_orientation']
+    clipped_head_frames = None
+    if 'head_relative_target' in dg:
+        _, saturated = limit_head_target(rob, dg['head_relative_target'])
+        clipped_head_frames = dict(zip(target_profile.HEAD_JOINTS, saturated.sum(axis=0).tolist()))
     body_heights=values['body_heights'];body_errors=values['body_errors']
     contact_vel={s:[] for s in rob.sides}
     root_speed=np.linalg.norm(np.gradient(data['root_pos'].astype(float),1/fps,axis=0),axis=1)
@@ -163,6 +168,7 @@ def audit(path,write=True,cache=None,changed=None):
         'root_target_difference_cm':stats(np.linalg.norm(data['root_pos']-dg['root_target'],axis=1)*100),
         'root_orientation_deg':stats(root_orientation),'torso_orientation_deg':stats(torso_orientation),
         'head_orientation_deg':stats(present(head_orientation)),
+        'head_target_clipped_frames_by_joint':clipped_head_frames,
         'torso_up_deg':stats(torso_up),'stationary_floating_longest_seconds':floating['longest_seconds'],
         'floating_audit':floating,
         'sides':{},'contact_segments':segments,

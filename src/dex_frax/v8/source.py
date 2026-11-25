@@ -20,6 +20,23 @@ def head_relative_target(torso, head):
     return frame_yz(lateral, np.cross(forward, lateral))
 
 
+def limit_head_target(robot, relative):
+    """Limit a torso-relative Z-Y target by the two named model ranges."""
+    forward = relative[:, :, 0]
+    yaw = np.arctan2(-relative[:, 0, 1], relative[:, 1, 1])
+    pitch = np.arctan2(-forward[:, 2], np.linalg.norm(forward[:, :2], axis=1))
+    angles = np.column_stack((yaw, pitch))
+    columns = 3 + robot.head_joints
+    limited = np.clip(angles, robot.lower[columns], robot.upper[columns])
+    saturated = np.abs(angles - limited) > 1e-12
+    changed = np.any(saturated, axis=1)
+    if changed.any():
+        from scipy.spatial.transform import Rotation
+        relative = relative.copy()
+        relative[changed] = Rotation.from_euler('ZY', limited[changed]).as_matrix()
+    return relative, saturated
+
+
 def rest_forearm_width(motion,side):
     """Finger-base separation in the zero-rotation BVH forearm frame.
 

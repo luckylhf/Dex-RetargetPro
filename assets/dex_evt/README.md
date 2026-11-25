@@ -10,6 +10,8 @@
 | 脚底碰撞 | 两侧 `ankle_roll_*_link` 各 7 个 `capsule` | 仿真使用胶囊。离线落脚、自碰和场景检测使用脚部视觉网格凸包 |
 | 导出关节顺序 | 原始 31 个活动关节 | 保留原身体 29 列顺序，末尾为 `head_yaw_joint`、`head_pitch_joint` |
 
+头部角度限位由配套模型提供，两轴的角度和额定速度记录在 [model.json](model.json)。源头部目标超出可达角度时允许触限饱和。 [头部硬限位规则](../../docs/SAFETY_REPAIR_RULES.md#头部硬限位)
+
 求解器的身体角色映射和具名装配排除在 [robot_profile.py](../../src/dex_frax/robot_profile.py) 中。离线几何映射在 [model_cache.py](../../src/dex_frax/model_cache.py) 中。可用 `DEX_FRAX_ASSETS` 指向按同一布局导入的资产目录。
 
 从已检出的上游工作树重新导入：

@@ -170,6 +170,7 @@ def convert(bvh,output,source='auto',model=DEFAULT_MODEL,fps=None,config=None,ma
     phase('initial',compile_possible=initial_solver is not None and not getattr(initial_solver,'strict',False))
     if initial_solver is None:phase('v8_ik')
     x,records=(solve if initial_solver is None else initial_solver)(robot,t,cfg['solver'],lambda i,n:print(f'{output.stem}: {i}/{n} {time.monotonic()-start:.1f}s',flush=True))
+    robot.clip_head_angles(x[:, 3:])
     if boxes:
         from ..scene_support import fit as fit_scene
         x = fit_scene(robot,t,x)
@@ -299,8 +300,9 @@ def convert(bvh,output,source='auto',model=DEFAULT_MODEL,fps=None,config=None,ma
     quat=Rotation.from_matrix(result_root_r).as_quat()
     for i in range(1,len(quat)):
         if quat[i]@quat[i-1]<0:quat[i]*=-1
-    payload={'fps':motion.fps,'root_pos':x[:,:3].astype(np.float32),'root_rot':quat.astype(np.float32),
-        'dof_pos':x[:,3:].astype(np.float32),'joint_names':robot.names,'quat_order':'xyzw',
+    stored = robot.export_rows(x)
+    payload={'fps':motion.fps,'root_pos':stored[:,:3].copy(),'root_rot':quat.astype(np.float32),
+        'dof_pos':stored[:,3:].copy(),'joint_names':robot.names,'quat_order':'xyzw',
         'local_body_pos':None,'link_body_list':None,'model_sha256':sha(robot.path),'robot':robot_profile.ROBOT_ID}
     sample_times = source_origin + np.arange(len(x), dtype=float)/motion.fps if source_time is None else source_time
     payload.update(source_time_s=sample_times,source_frame_float=sample_times*motion.input_fps,source_fps=motion.input_fps)

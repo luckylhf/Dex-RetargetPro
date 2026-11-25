@@ -22,6 +22,7 @@ class Robot:
             raise ValueError('Expected Dex 31 revolute joints and actuators plus free pelvis')
         hinges = {m.joint(int(i)).name: i for i in self.jids}
         self.names = list(profile.JOINT_ORDER)
+        self.head_joints = np.array([self.names.index(name) for name in profile.HEAD_JOINTS])
         if set(self.names) != hinges.keys():
             raise ValueError('Robot profile joints differ from the MJCF hinge joints')
         self.jids = np.array([hinges[name] for name in self.names])
@@ -78,6 +79,27 @@ class Robot:
         # Array is in joint_names order, without the three root translations.
         numerical_limit = np.deg2rad(cfg['numerical_joint_speed_deg_s'])
         return np.minimum(self.speed_limits, numerical_limit) / fps
+
+    def clip_head_angles(self, joints):
+        """Clamp finite head angles in joint-name order, in place."""
+        ids = self.head_joints
+        lower, upper = self.lower[3 + ids], self.upper[3 + ids]
+        lo, hi = lower.astype(joints.dtype), upper.astype(joints.dtype)
+        # A float32 endpoint must still be inside the model's float64 range.
+        lo = np.where(lo < lower, np.nextafter(lo, hi), lo)
+        hi = np.where(hi > upper, np.nextafter(hi, lo), hi)
+        head = joints[:, ids]
+        clipped = np.clip(head, lo, hi)
+        changed = np.isfinite(head) & (clipped != head)
+        if changed.any():
+            joints[:, ids] = np.where(changed, clipped, head)
+        return bool(changed.any())
+
+    def export_rows(self, rows):
+        """Apply the storage precision and head limits before auditing a candidate."""
+        stored = rows.astype(np.float32)
+        self.clip_head_angles(stored[:, 3:])
+        return stored
 
     def bid(self,name):
         i=mujoco.mj_name2id(self.m,mujoco.mjtObj.mjOBJ_BODY,name)

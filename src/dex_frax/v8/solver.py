@@ -12,7 +12,7 @@ from .math3d import unit,skew
 from .anatomy import wrist_barrier
 from .task_weights import hand_weights
 from .contact_tasks import body_height_task
-from .source import head_relative_target
+from .source import head_relative_target, limit_head_target
 
 class Objective:
     def __init__(self,robot,t,i,weights,previous=None,predicted=None):
@@ -20,7 +20,8 @@ class Objective:
         self.prev,self.pred=previous,predicted
         self.cache_x=None
         torso = t['torso_r'][i:i+1]
-        self.head_target = head_relative_target(torso, t.get('head_r', t['torso_r'])[i:i+1])[0]
+        head_target = head_relative_target(torso, t.get('head_r', t['torso_r'])[i:i+1])
+        self.head_target = limit_head_target(robot, head_target)[0][0]
 
     def evaluate(self,x):
         if self.w.get('_repair_deadline') is not None:

@@ -247,7 +247,7 @@ def repair_output(robot, targets, xs, meta, payload, path, solve, similarity_mod
             return evaluate(trial,description,solve,'frax'),data
         def consider(candidate,stage,side,a,b,detail):
             nonlocal out,metrics,quality,kept
-            candidate=candidate.astype(np.float32).astype(float)
+            candidate=robot.export_rows(candidate).astype(float)
             soft_candidate=similarity_mode=='soft' and stage in ('arms','branch','collision')
             reason=preservation_guard(robot,targets,out,candidate,weights,metrics,collision_reference if stage=='collision' and soft_candidate else original,stage,side,a,b,soft_candidate,original_metrics,detail.get('freeze_start',True),detail.get('freeze_end',True))
             if reason:return False,reason

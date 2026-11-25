@@ -16,6 +16,8 @@ dex-frax explain outputs/bvh_refine/frax
 
 `run.json` 的 `status=complete` 表示转换进程已完成。能否用于训练以验收状态和实际导出的 `training_npz` 为准。普通轨迹和训练文件的字段见 [输出说明](INPUTS.md#输出)。
 
+`head_tracking.target_clipped_frames_by_joint` 记录各头部关节源目标截限的帧数，`orientation_error_deg` 记录头部朝向与源目标的差异。触限饱和不影响验收状态。实际输出的角度、超速和碰撞问题按 `flags` 排查。 [头部硬限位规则](SAFETY_REPAIR_RULES.md#头部硬限位)
+
 `dex-frax preview` 用 `motion.pkl` 渲染 MP4 和同名 GIF。安装时加上 `preview` 可选依赖，再执行下列命令。预览和续跑会读取 PKL，只使用自己生成或可信来源的文件。
 
 ```sh
