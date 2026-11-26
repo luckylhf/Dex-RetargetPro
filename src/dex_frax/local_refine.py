@@ -68,7 +68,7 @@ def _qp_with_collision_slack(P, gradient, constraints, lower, upper, soft_rows):
     return result[:n], report
 
 
-def _qp_with_geometry_slack(P, gradient, A, lower, upper, G, gl, gh):
+def _qp_with_geometry_slack(P, gradient, A, lower, upper, G, gl, gh, *, time_limit_s=None):
     """Use temporary slack to reach a nonlinear geometry-feasible region."""
     lower_rows, upper_rows = np.isfinite(gl), np.isfinite(gh)
     geometry = vstack([-G[lower_rows],G[upper_rows]],format='csc')
@@ -82,12 +82,13 @@ def _qp_with_geometry_slack(P, gradient, A, lower, upper, G, gl, gh):
     result, report = _qp(objective,np.r_[gradient,np.full(len(bounds),.02)],constraints,
                          np.r_[lower,np.full(len(bounds),-np.inf),np.zeros(len(bounds))],
                          np.r_[upper,bounds,np.full(len(bounds),np.inf)],
-                         initial,scaling=10,require_optimal=False,feasible_tolerance=1e-6)
+                         initial,scaling=10,require_optimal=False,feasible_tolerance=1e-6,
+                         time_limit_s=time_limit_s)
     report['geometry_search_slack_max_m'] = float(result[P.shape[0]:].max(initial=0.))
     return result[:P.shape[0]],report
 
 
-def fit_window(robot, t, xs, cfg, a, b, iterations=12,ids_override=None,objective_factory=None,local_checks=False,allow_support=False,seed=None,protected_frames=None):
+def fit_window(robot, t, xs, cfg, a, b, iterations=12,ids_override=None,objective_factory=None,local_checks=False,allow_support=False,seed=None,protected_frames=None,*,flight_legs_only=False):
     ids = upper_ids(robot) if ids_override is None else np.asarray(ids_override)
     # Inferred active upper-body support requires a contact-aware whole-body
     # solve. Keep this fast path conservative and leave the final gate active.
@@ -116,6 +117,8 @@ def fit_window(robot, t, xs, cfg, a, b, iterations=12,ids_override=None,objectiv
     reconstruction = cfg.get('_frame_reconstruction')
     coupled_support = bool(cfg.get('_coupled_swept_support'))
     coupled_leg_clearance = bool(cfg.get('_coupled_leg_clearance'))
+    phase_search = bool(cfg.get('_phase_elastic_search'))
+    elastic_geometry = reconstruction is not None or phase_search
     motor_step = np.r_[np.full(3,np.inf),robot.speed_limits/t['fps']][ids]
     step = np.r_[np.full(3,np.inf),robot.joint_step(t['fps'], cfg)][ids]
     if reconstruction is not None or coupled_support:
@@ -152,6 +155,11 @@ def fit_window(robot, t, xs, cfg, a, b, iterations=12,ids_override=None,objectiv
     if b<len(xs):fixed_frames.extend(j for j in (n-2,n-1) if passing[j])
     if reconstruction is not None or coupled_support:
         frozen = protected_height(t,len(t['root_p']))[a:b].copy()
+        if flight_legs_only:
+            leg_columns=[column for side in robot.sides.values() for column in side['leg']]
+            if protected_frames is None or not np.isin(ids,leg_columns).all():
+                raise ValueError('flight_reconstruction_requires_leg_axes_and_protection_mask')
+            frozen &= ~t['reconstructible_flight'][a:b]
         frozen[[0,1,-2,-1]] = True
         fixed_frames = np.flatnonzero(frozen).tolist()
     if protected_frames is not None:
@@ -229,7 +237,8 @@ def fit_window(robot, t, xs, cfg, a, b, iterations=12,ids_override=None,objectiv
                           initial_leg_repair=initial_leg,collision_cfg=cfg.get('_initial_leg_collision_cfg'),
                           frame_reconstruction=reconstruction is not None,coupled_support=coupled_support,
                           preserve_support_step=bool(cfg.get('_preserve_support_step')),
-                          coupled_leg_clearance=coupled_leg_clearance)
+                          coupled_leg_clearance=coupled_leg_clearance,
+                          restore_violations_only=bool(cfg.get('_restore_violations_only')))
     if geometry and not restore and not coupled_support and reconstruction is None and geometry.evaluate(q.ravel())>1e-8:
         # Start from the feasible boundary reference when a branch proposal
         # violates floor/support; hard constraints cannot certify that seed.
@@ -264,7 +273,7 @@ def fit_window(robot, t, xs, cfg, a, b, iterations=12,ids_override=None,objectiv
     already_clear=bool(restore and geometry and geometry.last.get('safety_goal_met',False))
     for iteration in range(start_iteration,start_iteration if already_clear else iterations):
         iteration_started=time.monotonic()
-        if (coupled_leg_clearance and accepted
+        if ((coupled_leg_clearance or phase_search) and accepted
                 and cfg['_repair_deadline']-iteration_started < last_iteration_s+1.):
             break
         save_iteration(iteration)
@@ -279,7 +288,7 @@ def fit_window(robot, t, xs, cfg, a, b, iterations=12,ids_override=None,objectiv
         constraints=A
         if geometry:
             G,gl,gh=geometry.evaluate(z,linear=True)
-            if reconstruction is None:
+            if not elastic_geometry:
                 constraints=vstack([A,G],format='csc');dl=np.r_[dl,gl];du=np.r_[du,gh]
         if coupled_support:
             F,gap=geometry.floor_objective
@@ -292,16 +301,16 @@ def fit_window(robot, t, xs, cfg, a, b, iterations=12,ids_override=None,objectiv
         H=J.T@J+eye(z.size,format='csc')*.01;gradient=J.T@res
         objective_scale=max(1.,float(abs(H.diagonal()).max()))
         qp_budget={}
-        if coupled_leg_clearance:
+        if coupled_leg_clearance or phase_search:
             time_left=cfg['_repair_deadline']-time.monotonic()-1.5
             if time_left<=0.:
                 if accepted:break
                 raise TimeoutError('local_geometry_deadline')
             qp_budget['time_limit_s']=time_left
         try:
-            if reconstruction is not None and geometry:
+            if elastic_geometry and geometry:
                 delta, qp_report = _qp_with_geometry_slack(H/objective_scale,gradient/objective_scale,
-                    A,dl,du,G,gl,gh)
+                    A,dl,du,G,gl,gh,**qp_budget)
             elif initial_leg and geometry and geometry.elastic_rows:
                 delta, qp_report = _qp_with_collision_slack(H/objective_scale,gradient/objective_scale,
                     constraints,dl,du,np.asarray(geometry.elastic_rows)+A.shape[0])
@@ -317,16 +326,16 @@ def fit_window(robot, t, xs, cfg, a, b, iterations=12,ids_override=None,objectiv
         qp_reports.append(qp_report)
         moved = False
         for alpha in (1., .5, .25, .125, .0625, .03125, .015625):
-            if coupled_leg_clearance and time.monotonic()>=cfg['_repair_deadline']-.65:
+            if (coupled_leg_clearance or phase_search) and time.monotonic()>=cfg['_repair_deadline']-.65:
                 break
             candidate = z + alpha*delta
             r = evaluate(candidate); geometric_cost=geometry.evaluate(candidate) if geometry else 0.
-            if geometry and cfg.get('_temporal_repair_gain',0.) and not restore and geometric_cost>1e-6:continue
+            if geometry and cfg.get('_temporal_repair_gain',0.) and not restore and not phase_search and geometric_cost>1e-6:continue
             if initial_leg and geometry and (geometry.last['floor_regression_m']>2e-6 or
                                              geometry.last['contact_regression_m']>1e-7):
                 continue
-            if coupled_support and (geometry.last['contact_regression_m']>5e-8 or
-                                    geometry.last['nonregression_excess']>1.5e-6):
+            if coupled_support and not phase_search and (geometry.last['contact_regression_m']>5e-8 or
+                                                         geometry.last['nonregression_excess']>1.5e-6):
                 continue
             new_cost = float(r @ r)+geometric_cost
             old_linear=max(float(np.max(low-A@z)),float(np.max(A@z-high)),0.)

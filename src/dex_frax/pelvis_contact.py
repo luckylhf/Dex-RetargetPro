@@ -81,9 +81,15 @@ def _window(robot, targets, rows, job):
     return left, right
 
 
-def propose(robot, targets, rows, job, deadline):
+def propose(robot, targets, rows, job, deadline, *, restore_violations=False, foot_geometry=False):
     """Jointly fit root position, small root rotations and support limb hinges."""
-    a, b = _window(robot, targets, rows, job)
+    if foot_geometry:
+        a = max(job['start'], job['core_start'] - 3)
+        b = min(job['end'], job['core_end'] + 3)
+    else:
+        a, b = _window(robot, targets, rows, job)
+    if b-a<5:
+        raise ValueError('pelvis_contact_window_too_short')
     reference = rows[a:b]
     rotations = targets['root_r'][a:b]
     source = targets.get('source_root_r', targets['root_r'])[a:b]
@@ -94,13 +100,17 @@ def propose(robot, targets, rows, job, deadline):
     arms = []
     for side, group in robot.sides.items():
         bodies = {group[k] for k in ('shoulder', 'elbow', 'forearm', 'wrist', 'hand', 'tcp')}
-        if any(c['body'] in bodies and any(preserve_contact(c, i) for i in range(a, b))
+        if not foot_geometry and any(c['body'] in bodies and any(preserve_contact(c, i) for i in range(a, b))
                for c in targets.get('body_contacts', ())):
             arms.extend(group['arm'])
     ids = np.asarray([0, 1, 2] + sum([g['leg'] for g in robot.sides.values()], []) + arms)
     n, width = len(reference), len(ids) + 3
     template = np.column_stack((reference[:, ids], np.zeros((n, 3))))
-    free = np.flatnonzero(np.broadcast_to(~fixed[:, None], template.shape).ravel())
+    writable = np.broadcast_to(~fixed[:, None], template.shape).copy()
+    if foot_geometry:
+        writable[:, :2] = False
+        writable[:, -3:] = False
+    free = np.flatnonzero(writable.ravel())
     expected, limits = [], []
     surfaces = [(body, v['hull']) for body, v in robot.surface_models.items()]
     height = targets['body_contact_height_tolerance_m']
@@ -111,7 +121,16 @@ def propose(robot, targets, rows, job, deadline):
         for side, g in robot.sides.items():
             f = targets['sides'][side]
             if f['contact'][i] > 0:
-                feet.append((g['foot'], g['hull'], f['pivots'][i], f['anchors'][i, :2]))
+                anchor = f['anchors'][i, :2]
+                pivot = f['pivots'][i]
+                limit = .9 * SUPPORT_ACCEPTANCE_M
+                if restore_violations or foot_geometry:
+                    point = robot.point(g['foot'], pivot)
+                    floor = _surface_point(robot, g['foot'], g['hull'])[1][2]
+                    error = np.linalg.norm(np.r_[point[:2] - anchor, floor])
+                    if error <= SUPPORT_ACCEPTANCE_M:
+                        limit = max(.99 * SUPPORT_ACCEPTANCE_M, error)
+                feet.append((g['foot'], g['hull'], pivot, anchor, limit))
         for contact in targets.get('body_contacts', ()):
             if not preserve_contact(contact, i):
                 continue
@@ -121,10 +140,14 @@ def propose(robot, targets, rows, job, deadline):
             anchor = contact['anchors'][i, :2] if contact['mode'][i] == 1 else None
             z = abs(p[2])
             z_limit = min(height, z + BODY_DRIFT_M * .95) if z <= height else z
+            if restore_violations and z > height:
+                z_limit = height - .00010
             xy_limit = None
             if anchor is not None:
                 xy = np.linalg.norm(p[:2] - anchor)
                 xy_limit = min(horizontal, xy + BODY_DRIFT_M * .95) if xy <= horizontal else xy
+                if restore_violations and xy > horizontal:
+                    xy_limit = horizontal - .00010
             support.append((body, hull, z_limit, anchor, xy_limit))
         expected.append((feet, support))
         angle = Rotation.from_matrix(rotation @ source[i - a].T).magnitude()
@@ -140,10 +163,13 @@ def propose(robot, targets, rows, job, deadline):
             x = sum(coef * reference[i] for i, coef in terms)
             robot.set(x, rr)
             _, _, minimum = _lowest_surface(robot, surfaces)
-            needed = max(0., .0004 - minimum[2])
+            floor_limit = -.00085
+            if (restore_violations or foot_geometry) and minimum[2] >= -SUPPORT_ACCEPTANCE_M:
+                floor_limit = min(-.00099,minimum[2])
+            needed = max(0., floor_limit - minimum[2]) if restore_violations or foot_geometry else max(0., .0004 - minimum[2])
             for i, _ in terms:
                 required_lift[i] = max(required_lift[i], needed)
-            samples.append((j, k, rr, terms))
+            samples.append((j, k, rr, terms, floor_limit))
     lifted = template.copy()
     # Raise the entire window above the floor, then descend until each
     # sampled interval is just clear. This is a seed, never an export.
@@ -201,7 +227,7 @@ def propose(robot, targets, rows, job, deadline):
             ball(step[:3], eye[:3], root_bounds[j], terms)
             ball(step[-3:], eye[-3:], MAX_STEP_RAD, terms)
 
-        for j, k, rr, terms in samples:
+        for j, k, rr, terms, floor_limit in samples:
             if all(fixed[i] for i, _ in terms):
                 continue
             val = sum(coef * values[i] for i, coef in terms)
@@ -217,19 +243,19 @@ def propose(robot, targets, rows, job, deadline):
             # All surfaces share a plane, so their lowest witness suffices
             # for the search. The export guard still checks every body.
             body, local, p = _lowest_surface(robot, surfaces)
-            add(p[2] + .00085, point_jac(body, local, p)[2], terms)
+            add(p[2] - floor_limit, point_jac(body, local, p)[2], terms)
             if k:
                 continue
             ball(val[-3:], eye[-3:], POSE_CAP_RAD, terms)
             relative = Rotation.from_matrix(rotation @ source[j].T).as_rotvec()
             add(limits[j] - np.linalg.norm(relative),
                 np.r_[np.zeros(width - 3), -(relative @ angular) / max(1e-12, np.linalg.norm(relative))], terms)
-            for body, hull, pivot, anchor in expected[j][0]:
+            for body, hull, pivot, anchor, limit in expected[j][0]:
                 local, p = _surface_point(robot, body, hull)
                 foot = robot.point(body, pivot)
                 error = np.r_[foot[:2] - anchor, p[2]]
                 g = np.vstack((point_jac(body, pivot, foot)[:2], point_jac(body, local, p)[2]))
-                ball(error, g, .9 * SUPPORT_ACCEPTANCE_M, terms)
+                ball(error, g, limit, terms)
             for body, hull, z_limit, anchor, xy_limit in expected[j][1]:
                 local, p = _surface_point(robot, body, hull)
                 g = point_jac(body, local, p)

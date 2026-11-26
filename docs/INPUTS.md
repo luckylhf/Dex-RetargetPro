@@ -29,7 +29,25 @@ dex-frax convert /path/to/input.pt outputs/smplx_preview \
 
 ## 机器人模型与接触
 
-源码包的模型在 `assets/dex_evt`，包含可视 STL、碰撞几何及模型配置。安装后用 `DEX_FRAX_ASSETS` 指向匹配资产目录。`refine` 可用 `--scene` 提供机器人导出坐标系下的实测轴对齐箱体。存在 GVHMR 静止分数时，`--grounding contact` 先用高置信、位置较低的脚估计共同的高度漂移。最终足部接触仍由脚跟和脚尖相对地面的高度、速度、稳定帧数和脚锚位移推断，输出全脚掌、脚尖、脚跟或摆动。可信身体支撑根据固定、滚动或滑动相位分别约束。腾空和未确认的抬高支撑进入高度保护。
+源码包的模型在 `assets/dex_evt`，包含可视 STL、碰撞几何及模型配置。安装后用 `DEX_FRAX_ASSETS` 指向匹配资产目录。
+
+存在 GVHMR 静止分数时，`--grounding contact` 先用高置信、位置较低的脚估计共同的高度漂移。足部接触由脚跟和脚尖的高度、速度、稳定帧数和脚锚位移推断，区分全脚掌、脚尖、脚跟或摆动。可信身体支撑按固定、滚动或滑动相位约束。腾空和未确认的高处支撑进入高度保护。
+
+### 场景盒体
+
+`refine --scene scene.json` 接受实测轴对齐盒体。使用机器人导出坐标系，Z 轴向上，单位为米。每个盒体使用唯一 `id`，`center_m` 填中心坐标，`half_size_m` 填各轴半长。用 `provenance` 记录测量来源。
+
+```json
+{
+  "frame": "robot_export_world_z_up_metres",
+  "provenance": "现场测量记录",
+  "boxes": [
+    {"id": "platform", "center_m": [1.0, 0.0, 0.15], "half_size_m": [0.4, 0.3, 0.15]}
+  ]
+}
+```
+
+实测盒体优先匹配源支撑。LAFAN 的默认 A 路线对其余高处区间使用稳定足点和重力判据推断支撑。 [查看未确认支撑与平台残差](VALIDATION.md#按剩余问题处理)
 
 ## 输出
 

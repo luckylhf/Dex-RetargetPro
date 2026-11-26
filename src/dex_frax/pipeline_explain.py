@@ -346,6 +346,8 @@ def render(report):
             lines += ['', '## 支撑面', '',
                       f"候选待确认区间 {len(support.get('unresolved_platforms',[]))} 个，"
                       f"已指定平台脚部约束 {measured.get('support_targets',0)} 个帧样本。"]
+            if support.get('gravity_inferred_platforms'):
+                lines.append(f"根据重力与稳定足点判定的平台支撑区间 {len(support['gravity_inferred_platforms'])} 个。")
         if report.get('pose_notes') and report.get('status')=='accepted_with_notes':
             lines += ['', '保留意见通过可交付动作预览，姿态意见随报告保留。训练导出仅用于完全通过。']
         if report.get('retiming'):

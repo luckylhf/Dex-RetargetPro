@@ -2,7 +2,7 @@
 import time
 
 import numpy as np
-from .airborne import protected_height
+from .airborne import airborne_mask, protected_height
 from scipy.interpolate import CubicHermiteSpline
 from scipy.optimize import least_squares, minimize
 from scipy.spatial.transform import Rotation
@@ -61,7 +61,8 @@ def regress_at(before, after, tolerance, margin=1e-7):
 
 
 class Repair:
-    def __init__(self, robot, targets, diagnostics, rows, rotations, model, deadline):
+    def __init__(self, robot, targets, diagnostics, rows, rotations, model, deadline,
+                 *, allow_unconfirmed_arm_jitter=False):
         self.robot = robot
         self.targets = targets
         self.diagnostics = diagnostics
@@ -72,6 +73,18 @@ class Repair:
         self.deadline = deadline
         self.fps = targets['fps']
         self.air = protected_height(targets,len(rows))
+        self.arm_only = np.zeros(len(rows),bool)
+        if allow_unconfirmed_arm_jitter:
+            uncertain = np.broadcast_to(targets.get('source_support_uncertain',False), (len(rows),))
+            scene = np.broadcast_to(targets.get('source_scene_support',False), (len(rows),))
+            inferred = np.broadcast_to(targets.get('source_inferred_platform',False), (len(rows),))
+            self.arm_only = ((uncertain & ~scene) | inferred) & ~airborne_mask(targets,len(rows))
+            for contact in targets.get('body_contacts',()):
+                for i in np.flatnonzero(self.arm_only & (np.asarray(contact['mode']) > 0)):
+                    if preserve_contact(contact,i):
+                        self.arm_only[i] = False
+        arm_columns = [column for group in robot.sides.values() for column in group['arm']]
+        self.non_arm_columns = np.setdiff1d(np.arange(rows.shape[1]),arm_columns)
         self.events = []
 
     def time_left(self):
@@ -80,6 +93,13 @@ class Repair:
     def temporal(self, rows, a, b):
         targets = {k: v[a:b] for k, v in self.diagnostics.items() if v.ndim and len(v)==len(rows)}
         return assess(rows[a:b, 3:], self.fps, self.robot.names, targets)
+
+    def protected_pose_changed(self, before, after, a, b):
+        arm_only = self.arm_only[a:b]
+        locked = self.air[a:b] & ~arm_only
+        return (not np.array_equal(before[a:b][locked],after[a:b][locked]) or
+                not np.array_equal(before[a:b][np.ix_(arm_only,self.non_arm_columns)],
+                                   after[a:b][np.ix_(arm_only,self.non_arm_columns)]))
 
     def supports(self, rows, rotations, a, b):
         r = self.robot
@@ -113,7 +133,7 @@ class Repair:
     def check(self, rows, rotation, a, b):
         if not np.isfinite(rows[a:b]).all() or not np.isfinite(rotation[a:b]).all():
             return 'nonfinite'
-        if np.any(rows[a:b][self.air[a:b]] != self.rows[a:b][self.air[a:b]]):
+        if self.protected_pose_changed(self.rows,rows,a,b):
             return 'source_airborne_changed'
         lo, hi = max(0,a-2), min(len(rows),b+2)
         knees = [g['leg'][3] for g in self.robot.sides.values()]
@@ -151,7 +171,53 @@ class Repair:
                 return 'swept_collision_pair_regression'
         return None
 
-    def jitter(self):
+    def compensate_jitter_foot(self, rows, joint, lo, hi):
+        """Hold the jittered hinge and recover the planted sole with other hinges."""
+        robot = self.robot
+        for side, group in robot.sides.items():
+            if joint in group['leg']:
+                break
+        else:
+            return False
+        foot = self.targets['sides'][side]
+        indices = np.flatnonzero((foot['contact'][lo+1:hi]>0) &
+                                 (rows[lo+1:hi,joint]!=self.rows[lo+1:hi,joint])) + lo + 1
+        if not len(indices) or self.air[indices].any():
+            return False
+        columns = np.asarray([j for j in group['leg'] if j!=joint])
+        body = group['foot']
+        hull = group['hull']
+        for i in indices:
+            if not self.time_left():
+                return False
+            current = self.rows[i]
+            pivot = foot['pivots'][i]
+            robot.set(current,self.rotations[i])
+            point = robot.point(body,pivot)
+            lowest = hull[np.argmin(hull @ robot.rot(body)[2])]
+            goal = np.r_[point[:2],robot.point(body,lowest)[2]]
+            row = rows[i].copy()
+            seed = row[columns].copy()
+            lower = np.maximum(robot.lower[columns],seed-np.deg2rad(8.))
+            upper = np.minimum(robot.upper[columns],seed+np.deg2rad(8.))
+
+            def residual(values, jacobian=False):
+                row[columns] = values
+                robot.set(row,self.rotations[i])
+                lowest = hull[np.argmin(hull @ robot.rot(body)[2])]
+                if jacobian:
+                    xy = robot.jac(body,pivot)[0][:2,columns]
+                    z = robot.jac(body,lowest)[0][2,columns]
+                    return np.vstack((1000.*np.vstack((xy,z)),np.eye(len(columns))))
+                actual = np.r_[robot.point(body,pivot)[:2],robot.point(body,lowest)[2]]
+                return np.r_[1000.*(actual-goal),values-seed]
+
+            fit = least_squares(residual,np.clip(seed,lower,upper),bounds=(lower,upper),
+                                jac=lambda x: residual(x,True),max_nfev=22)
+            rows[i,columns] = fit.x.astype(np.float32)
+        return True
+
+    def jitter(self, *, preserve_contact_edges=False):
         quality = self.temporal(self.rows,0,len(self.rows))
         tasks = []
         for j,name in enumerate(self.robot.names,3):
@@ -161,8 +227,22 @@ class Repair:
             if not self.time_left():
                 return
             options = []
+            bounds = []
             for radius in (1,2,3,5):
                 lo,hi = max(1,a-radius),min(len(self.rows)-2,b+radius)
+                bounds.append((False,lo,hi))
+                if not preserve_contact_edges:
+                    continue
+                for side, group in self.robot.sides.items():
+                    if j not in group['leg']:
+                        continue
+                    contact = np.asarray(self.targets['sides'][side]['contact']) > 0
+                    for edge in range(max(2,a-1),min(len(contact)-2,b+1)):
+                        if contact[edge] and not contact[edge-1]:
+                            bounds.append((True,lo,edge))
+                        elif contact[edge-1] and not contact[edge]:
+                            bounds.append((True,edge-1,hi))
+            for anchored,lo,hi in dict.fromkeys(bounds):
                 if hi-lo<3:
                     continue
                 ds = slice(lo+1,hi)
@@ -184,16 +264,28 @@ class Repair:
                     after = self.temporal(rows,start,end)
                     new = set(after['joints'][name]['violating_frames'])
                     if old-new and not regressions(before,after):
-                        options.append((len(new),float(np.max(abs(rows[ds,j]-original[ds]))),lo,hi,rows[ds,j].copy()))
-            for _,_,lo,hi,values in sorted(options,key=lambda x:x[:2])[:4]:
-                if not self.time_left():
-                    return
-                rows = self.rows.copy()
-                rows[lo+1:hi,j] = values
-                reason = self.check(rows,self.rotations,lo,hi+1)
-                self.events.append(dict(kind='jitter',window=[lo,hi+1],joint=name,reason=reason))
-                if reason is None:
-                    self.rows = rows
+                        options.append((anchored,len(new),float(np.max(abs(rows[ds,j]-original[ds]))),lo,hi,rows[ds,j].copy()))
+            kept = False
+            for anchored in (False,True):
+                candidates = sorted((x for x in options if x[0]==anchored),key=lambda x:x[1:3])[:4]
+                for _,_,_,lo,hi,values in candidates:
+                    if not self.time_left():
+                        return
+                    rows = self.rows.copy()
+                    rows[lo+1:hi,j] = values
+                    reason = self.check(rows,self.rotations,lo,hi+1)
+                    self.events.append(dict(kind='jitter',window=[lo,hi+1],joint=name,reason=reason,
+                                            contact_boundary=anchored))
+                    if (preserve_contact_edges and reason in ('support_regression','swept_floor_regression')
+                            and self.compensate_jitter_foot(rows,j,lo,hi)):
+                        reason = self.check(rows,self.rotations,lo,hi+1)
+                        self.events.append(dict(kind='jitter',window=[lo,hi+1],joint=name,reason=reason,
+                                                contact_boundary=anchored,foot_compensation=True))
+                    if reason is None:
+                        self.rows = rows
+                        kept = True
+                        break
+                if kept:
                     break
 
     def compensate_feet(self, rotation, changed, seed=None):
@@ -298,6 +390,10 @@ def final_guard(before, after, targets, old_cache, new_cache):
     added = set(after['flags']) - set(before['flags'])
     if added:
         return 'new_quality_flags:' + ','.join(sorted(added))
+    if 'inferred_platform_support' in before or 'inferred_platform_support' in after:
+        from .scene_support import gravity_regression
+        if gravity_regression(before,after):
+            return 'inferred_platform_support_regression'
     if regressions(before['temporal_quality'],after['temporal_quality']):
         return 'new_joint_jitter'
     for model in ('self_collision','full_self_collision'):

@@ -65,6 +65,9 @@ def quality_guard(before, after, soft_similarity=False, *, orientation_budget_de
     added=set(after['flags'])-set(before['flags'])
     if soft_similarity:added-=POSE_FLAGS
     if added:return 'new_quality_flags:'+','.join(sorted(added))
+    if 'inferred_platform_support' in before or 'inferred_platform_support' in after:
+        from .scene_support import gravity_regression
+        if gravity_regression(before,after):return 'inferred_platform_support_regression'
     if not soft_similarity and after['adaptive_pose_gate']['violating_frames']>before['adaptive_pose_gate']['violating_frames']:
         return 'more_sustained_pose_frames'
     for metric in ('torso_orientation_deg','torso_up_deg','root_orientation_deg'):

@@ -225,8 +225,13 @@ def audit(path,write=True,cache=None,changed=None):
     from ..support_quality import evaluate_contacts
     result['body_support']=evaluate_contacts(meta,dg,body_errors,n,fps)
     if meta.get('scene_support'):
-        from ..scene_support import audit_scene
-        result['scene_support']=audit_scene(rob,np.c_[data['root_pos'],q],rr,dg,meta['scene_support']['boxes'])
+        scene = meta['scene_support']
+        from ..scene_support import audit_scene, audit_gravity
+        rows = np.c_[data['root_pos'],q]
+        if scene['boxes']:
+            result['scene_support']=audit_scene(rob,rows,rr,dg,scene['boxes'])
+        if scene.get('gravity_inferred_platforms'):
+            result['inferred_platform_support']=audit_gravity(rob,rows,rr,dg,len(scene['boxes']))
     result['pelvis_relative_to_foot_speed'] = {
         side:pelvis_foot_speed(poses, fps, target_profile.PELVIS_RELATIVE_TO_FOOT[side])
         for side,poses in values['pelvis_in_foot'].items()

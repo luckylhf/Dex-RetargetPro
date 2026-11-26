@@ -109,13 +109,14 @@ def single_auto(args,worker_factory=None):
     from .dispatch import pipeline_stages,use_unified
     out=Path(args.output).resolve();out.mkdir(parents=True,exist_ok=False)
     started=time.monotonic();attempts=[];selected=None;status='running';preview=None
+    deadline = float('inf') if args.budget is None else started + args.budget
     atomic_json(out/'run.json',dict(status=status,mode='auto',source='smplx'))
     worker=None
     try:
         prepare(args,out,timeout=args.budget)
         worker=(worker_factory or Worker)()
         for mode in pipeline_stages(args):
-            remaining=args.budget-(time.monotonic()-started)
+            remaining=deadline-time.monotonic()
             if remaining<=0: status='budget_exhausted';break
             stage=out/mode
             options=vars(args).copy();options.update(output=str(stage),input=str(Path(args.input).resolve()),mode=mode)

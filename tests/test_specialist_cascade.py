@@ -15,6 +15,57 @@ from dex_frax.v8.robot import Robot
 from test_incremental_audit import export_neutral
 
 
+def test_legs_use_a_phase_fit_only_for_flight_or_coupled_support():
+    from dex_frax.refine_routing import leg_phase_repair
+
+    collision=np.zeros(80,bool)
+    contact_error=np.zeros_like(collision)
+    flight=np.zeros_like(collision)
+    foot_support=np.ones_like(collision)
+    flight[20:40]=True
+    foot_support[flight]=False
+    boundaries=np.array([0,20,40,64,80])
+    collision[[28,51,74]]=True
+
+    assert leg_phase_repair(24,34,collision,contact_error,flight,foot_support,boundaries,8)==('flight',[18,39])
+    assert leg_phase_repair(48,55,collision,contact_error,flight,foot_support,boundaries,8) is None
+    contact_error[51]=True
+    assert leg_phase_repair(48,55,collision,contact_error,flight,foot_support,boundaries,8)==('support',[43,60])
+    assert leg_phase_repair(70,77,collision,contact_error,flight,foot_support,boundaries,12)==('support',[62,80])
+
+
+def test_phase_recipe_reactivates_when_its_extended_context_changes():
+    from dex_frax.refine_queue import WorkQueue
+
+    queue=WorkQueue(distinct_contexts=True)
+    rows=np.zeros((72,4))
+    job=dict(module='leg_collision',side=None,core_start=25,core_end=46,
+             phase_leg_window=[10,60],candidate_order=['phase_leg_clearance'])
+    first,=queue.configure([job],rows)
+    queue.complete(first,False)
+    assert not queue.choices(first)
+
+    rows[12,0]=.01
+    refreshed,=queue.configure([job],rows)
+    assert queue.choices(refreshed)==['phase_leg_clearance']
+
+
+def test_failed_platform_phase_immediately_tries_the_protected_leg_fallback():
+    from dex_frax.refine_queue import WorkQueue
+    from dex_frax.refine_routing import next_window_job
+
+    queue=WorkQueue(distinct_contexts=True)
+    platform=dict(module='support',side='Left',core_start=20,core_end=40,severity=8,
+                  candidate_order=['platform_phase','platform_leg_only'])
+    other=dict(module='leg_collision',side=None,core_start=45,core_end=65,severity=9)
+    platform,other=queue.configure([platform,other],np.zeros((72,4)))
+    queue.complete(platform,False,recipe='platform_phase')
+    rejected=dict(platform,recipe='platform_phase',status='rejected',reason='foot_anchor_regression')
+
+    assert next_window_job(queue,[other,platform],rejected,attempts=[rejected]) is platform
+    assert queue.recipe(platform)=='platform_leg_only'
+
+
 def neutral_clip(folder):
     path, payload, meta, dg = export_neutral(folder, n=40)
     robot = Robot()
@@ -82,18 +133,59 @@ def test_default_flow_runs_jitter_in_the_a_specialist_queue(tmp_path, monkeypatc
     monkeypatch.setattr(refine_pipeline, 'propose', reject)
     monkeypatch.setattr(segment_refine, 'refine', unexpected_v8)
     repair_output(robot, targets, None, meta, payload, path, None,
-                  repair_budget=UNLIMITED_REPAIR_BUDGET, segment_cascade=True,
+                  segment_cascade=True,
                   repair_modules={'jitter', 'segment_solvers'})
     report = json.loads((tmp_path/'repair.json').read_text())
     assert calls[:2] == [('jitter', 'temporal'), ('jitter', 'temporal_more')]
     assert report['refine_flow'] == 'A'
-    assert report['policy']['name'] == 'joint_safety_before_pose_default_v7'
-    assert not report['temporal_repair'] and not (tmp_path/'cascade_segments.json').exists()
+    assert report['budget_source'] == 'default_unlimited'
+    assert not report['shared_budget_exhausted']
+    assert all(job['next_recipe'] is None for job in report['pending'])
+    assert report['policy']['name'] == 'specialists_then_residual_jitter_v1'
+    assert report['temporal_repair']['requested'] == ['conversion_added_jitter']
+    assert not (tmp_path/'cascade_segments.json').exists()
+    assert report['final_fresh_audit_equal']
+
+
+@pytest.mark.parametrize('order',['budgeted','phase'])
+def test_a_leaves_temporal_time_after_specialists_hit_deadline(tmp_path,monkeypatch,order):
+    from dex_frax import acceptance, refine_pipeline, sparse_jitter, temporal_repair
+
+    robot,targets,path,payload,meta = neutral_clip(tmp_path)
+    clock = [100.]
+    events = []
+    evaluate = acceptance.evaluate
+
+    def mark_jitter(*args,**kwargs):
+        quality = evaluate(*args,**kwargs)
+        quality['flags'] = sorted(set(quality['flags']) | {temporal_repair.JITTER})
+        quality['temporal_quality']['joints']['ankle_pitch_l_joint']['violating_frames'] = [18,19]
+        quality['temporal_quality']['violating_frames'] = [18,19]
+        return quality
+
+    def spend_slice(robot,targets,rows,reference,weights,model,job,recipe,deadline,*args):
+        clock[0] = deadline
+        events.append('specialist')
+        raise TimeoutError('test_candidate_deadline')
+
+    monkeypatch.setattr(acceptance,'evaluate',mark_jitter)
+    monkeypatch.setattr(refine_pipeline,'time',SimpleNamespace(monotonic=lambda:clock[0]))
+    monkeypatch.setattr(refine_pipeline,'propose',spend_slice)
+    monkeypatch.setattr(refine_pipeline,'repair_limits',lambda:dict(
+        specialist_candidate_seconds=20,v8_segment_seconds=50,a_order=order))
+    monkeypatch.setattr(temporal_repair.Repair,'jitter',lambda self,**kw:events.append('temporal'))
+    monkeypatch.setattr(sparse_jitter,'finish',lambda *args,**kwargs:[])
+    repair_output(robot,targets,None,meta,payload,path,None,
+                  repair_budget=40.,repair_modules={'jitter'})
+    report=json.loads((tmp_path/'repair.json').read_text())
+    assert events==['specialist','specialist','temporal']
+    assert report['temporal_reserve_s']==10.
+    assert report['temporal_repair']['status']=='completed'
     assert report['final_fresh_audit_equal']
 
 
 @pytest.mark.parametrize("elapsed, budget, runs_temporal", [
-    (2., None, True),
+    (120., None, True),
     (12., 10., False),
     (120., UNLIMITED_REPAIR_BUDGET, True),
 ])
@@ -106,8 +198,8 @@ def test_temporal_uses_only_remaining_shared_budget(tmp_path, monkeypatch, elaps
     clock = [time.monotonic()]
     real_refine = segment_refine.refine
     real_evaluate = acceptance.evaluate
-    unlimited = budget == UNLIMITED_REPAIR_BUDGET
-    expected_budget = None if unlimited else (50.5 if budget is None else budget)
+    unlimited = budget in (None, UNLIMITED_REPAIR_BUDGET)
+    expected_budget = None if unlimited else budget
 
     def geometry(*args, **kwargs):
         if unlimited:
@@ -141,6 +233,7 @@ def test_temporal_uses_only_remaining_shared_budget(tmp_path, monkeypatch, elaps
     assert report['available_budget_s'] == expected_budget
     assert report['full_input_frames_50hz'] == 101
     assert report['budget_policy'] == ('unlimited' if unlimited else 'shared_wall_time')
+    assert report['budget_source'] == ('default_unlimited' if budget is None else 'explicit')
     assert report['shared_budget_exhausted'] is not runs_temporal
     assert report['temporal_repair']['status'] == ('completed' if runs_temporal else 'no_remaining_budget')
     assert report['final_fresh_audit_equal']

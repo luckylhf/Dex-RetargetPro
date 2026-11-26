@@ -3,6 +3,7 @@ import argparse
 import contextlib
 import hashlib
 import json
+import math
 import multiprocessing
 from pathlib import Path
 import re
@@ -101,11 +102,11 @@ class Worker:
             self.process.start();child.close()
         try:
             self.connection.send(job)
-            remaining=max(0.,timeout-(time.perf_counter()-start))
             while True:
-                remaining=max(0.,timeout-(time.perf_counter()-start))
-                if not self.connection.poll(remaining):
-                    self.close();return dict(status='timeout',elapsed_s=time.perf_counter()-start)
+                if math.isfinite(timeout):
+                    remaining=max(0.,timeout-(time.perf_counter()-start))
+                    if not self.connection.poll(remaining):
+                        self.close();return dict(status='timeout',elapsed_s=time.perf_counter()-start)
                 response=self.connection.recv()
                 if 'resource_event' not in response:break
             response['worker_wall_s']=time.perf_counter()-start
@@ -147,6 +148,7 @@ def run(args,worker_factory=Worker):
     worker=worker_factory();state='running';active=None
     stages=pipeline_stages(args)
     timeouts={mode:getattr(args,mode+'_timeout') for mode in stages}
+    deadline = math.inf if args.budget is None else started + args.budget
 
     def save():
         accepted=[]
@@ -166,7 +168,7 @@ def run(args,worker_factory=Worker):
         for mode in stages:
             for source,record in zip(cases,records):
                 if record['status'] in ('accepted','input_error'):continue
-                remaining=args.budget-(time.perf_counter()-started)
+                remaining=deadline-time.perf_counter()
                 if remaining<=0:
                     state='budget_exhausted';break
                 case_dir=out if getattr(args,'single_pipeline',False) else out/source['id'];case_dir.mkdir(exist_ok=True)
@@ -179,7 +181,9 @@ def run(args,worker_factory=Worker):
                     pipeline=getattr(args,'pipeline','unified'),unified_repair=use_unified(args),repair_similarity=getattr(args,'repair_similarity','soft'),profile=getattr(args,'profile',None),repair_budget=getattr(args,'repair_budget',None),allow_local_slowdown=getattr(args,'allow_local_slowdown',False),scene=getattr(args,'scene',None),resume_recheck=getattr(args,'resume_recheck',False),continue_from=getattr(args,'continue_from',None))
                 job=dict(input=source['input'],input_sha256=source['input_sha256'],log=str(case_dir/(mode+'.log')),arguments=arguments)
                 active=(record,folder,mode)
-                response=worker.run(job,min(timeouts[mode],remaining))
+                stage_timeout = timeouts[mode]
+                timeout = remaining if stage_timeout is None else min(stage_timeout,remaining)
+                response=worker.run(job,timeout)
                 attempt={**response,'mode':mode,'output':str(folder.relative_to(out))}
                 try:selection=accepted_artifact(folder,attempt)
                 except (OSError,ValueError,KeyError) as error:

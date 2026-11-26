@@ -1,4 +1,4 @@
-"""Measured horizontal box tops and independently checked export geometry."""
+"""Elevated support targets and independent checks of the exported geometry."""
 
 import json
 from functools import lru_cache
@@ -54,15 +54,65 @@ def assign(targets, robot, observation, boxes):
     observation['surface_geometry_measured'] = bool(boxes)
 
 
-def fit(robot, targets, rows):
+def assign_gravity(targets, robot, unresolved, measured_count):
+    """Use supported source episodes to set a contact anchor and top height."""
+    from .refine_platform import gravity_support_windows
+    from .source_integrity import stable_segments
+
+    eligible = np.asarray(targets['source_airborne'],bool).copy()
+    for episode in unresolved:
+        eligible[episode['start']:episode['end']] = True
+    if not eligible.any():
+        return []
+    clock = np.arange(len(eligible),dtype=float) / targets['fps']
+    supported = gravity_support_windows(targets,clock,eligible)
+    platforms = []
+
+    def add(side,a,b):
+        foot = targets['sides'][side]
+        g = robot.sides[side]
+        poses = foot['raw_foot_p'][a:b]
+        rotations = foot['raw_foot_r'][a:b]
+        points = poses + rotations @ g['sole']
+        heights = poses[:,2] + np.min(rotations[:,2,:] @ g['hull'].T,axis=1)
+        anchor = [*np.median(points[:,:2],axis=0).tolist(),float(np.median(heights))]
+        index = measured_count + len(platforms)
+        surface = f'gravity_platform_{index}'
+        foot['platform_index'][a:b] = index
+        foot['platform_anchor'][a:b] = anchor
+        foot['foot_target_p'][a:b] = poses
+        foot['foot_target_r'][a:b] = rotations
+        for key in ('contact','phase','foot_flat_confidence','foot_roll_level_weight','ground_contact_confidence'):
+            if key in foot:
+                foot[key][a:b] = 0
+        platforms.append(dict(id=surface,side=side,start=int(a),end=int(b),
+                              anchor_m=anchor,method='stable_elevated_foot_and_gravity_v1'))
+        return surface
+
+    for episode in unresolved:
+        side,a,b = episode['side'],episode['start'],episode['end']
+        if supported[side][a:b].any():
+            episode['inferred_surface'] = add(side,a,b)
+    for side,mask in supported.items():
+        available = mask & (targets['sides'][side]['platform_index'] == NONE)
+        for a,b in stable_segments(available):
+            add(side,a,b)
+    return platforms
+
+
+def fit(robot, targets, rows, measured_count=None):
     """Dedicated contact fit leaves the generic floor/flight solver intact."""
     active = np.logical_or.reduce([v['platform_index']>=0 for v in targets['sides'].values()])
     if not active.any():
         return rows
     result = rows.copy()
-    ids = np.array([0,1,2,*[j for g in robot.sides.values() for j in g['leg']]])
-    movement = np.array([.08,.08,.13,*([.45]*(len(ids)-3))])
+    columns = np.array([0,1,2,*[j for g in robot.sides.values() for j in g['leg']]])
+    shift = np.array([.08,.08,.13,*([.45]*(len(columns)-3))])
     for i in np.flatnonzero(active):
+        indices = [v['platform_index'][i] for v in targets['sides'].values()]
+        inferred_only = measured_count is not None and all(j<0 or j>=measured_count for j in indices)
+        ids = columns[2:] if inferred_only else columns
+        movement = shift[2:] if inferred_only else shift
         row = rows[i]
         rotation = targets['root_r'][i]
         robot.set(row,rotation)
@@ -154,7 +204,7 @@ def audit_scene(robot, rows, rotations, diagnostics, boxes):
     for side,g in robot.sides.items():
         index = diagnostics.get(side+'_platform_index',np.full(len(rows),NONE))
         anchors = diagnostics.get(side+'_platform_anchor')
-        for i in np.flatnonzero(index>=0):
+        for i in np.flatnonzero((index>=0) & (index<len(boxes))):
             robot.set(rows[i],rotations[i])
             cloud = footprint(g,robot.rot(g['foot']),robot.point(g['foot']))
             point = robot.point(g['foot'],g['sole'])
@@ -162,7 +212,68 @@ def audit_scene(robot, rows, rotations, diagnostics, boxes):
             inside = within(cloud,boxes[index[i]])
             if error>SUPPORT_ACCEPTANCE_M or not inside:
                 errors.append(dict(frame=int(i),side=side,error_m=error,within_platform=inside))
-    return dict(checked=True,support_targets=int(sum(np.count_nonzero(
-                    np.asarray(diagnostics.get(side+'_platform_index',[]))>=0) for side in robot.sides)),
+    def measured_count(side):
+        indices = np.asarray(diagnostics.get(side+'_platform_index',[]))
+        return int(np.count_nonzero((indices>=0) & (indices<len(boxes))))
+
+    return dict(checked=True,support_targets=sum(measured_count(side) for side in robot.sides),
                 support_violations=errors,minimum_convex_distance_m=worst,
                 penetrating_samples=sorted(set(penetration)),substeps=8)
+
+
+def audit_gravity(robot, rows, rotations, diagnostics, measured_count):
+    """Audit the inferred foot anchor and sole clearance during the support episode."""
+    from scipy.spatial.transform import Rotation, Slerp
+
+    errors, penetrating = [], []
+    support_targets = 0
+    minimum = None
+    grid = np.arange(len(rows))
+    interpolate = Slerp(grid,Rotation.from_matrix(rotations))
+    for side,g in robot.sides.items():
+        index = diagnostics[side+'_platform_index']
+        anchors = diagnostics[side+'_platform_anchor']
+        active = index>=measured_count
+        native = np.flatnonzero(active)
+        support_targets += len(native)
+        interior = np.flatnonzero(active[:-1] & active[1:] & (index[:-1]==index[1:]))
+        samples = np.sort(np.r_[native*8,(interior[:,None]*8+np.arange(1,8)).ravel()])
+        if not len(samples):
+            continue
+        for sample,rotation in zip(samples,interpolate(samples/8.).as_matrix()):
+            i,part = divmod(int(sample),8)
+            fraction = part/8.
+            pose = (1.-fraction)*rows[i] + fraction*rows[i+1] if part else rows[i]
+            robot.set(pose,rotation)
+            origin = robot.point(g['foot'])
+            orientation = robot.rot(g['foot'])
+            height = float((g['hull'] @ orientation[2] + origin[2]).min()-anchors[i,2])
+            minimum = height if minimum is None else min(minimum,height)
+            if height < -SUPPORT_ACCEPTANCE_M:
+                penetrating.append(dict(side=side,sample=int(sample)))
+            if part==0:
+                point = origin + orientation @ g['sole']
+                error = float(np.linalg.norm(np.r_[point[:2]-anchors[i,:2],height]))
+                if error>SUPPORT_ACCEPTANCE_M:
+                    errors.append(dict(frame=i,side=side,error_m=error))
+    return dict(support_targets=support_targets,support_violations=errors,penetrating_samples=penetrating,
+                minimum_sole_clearance_m=minimum,substeps=8)
+
+
+def gravity_regression(before, after):
+    prior = before.get('inferred_platform_support')
+    current = after.get('inferred_platform_support')
+    if prior is None or current is None:
+        return prior is not None or current is not None
+    if prior['support_targets']!=current['support_targets']:
+        return True
+    errors = {(v['side'],v['frame']):v['error_m'] for v in prior['support_violations']}
+    if any(v['error_m']>errors.get((v['side'],v['frame']),SUPPORT_ACCEPTANCE_M)+1e-7
+           for v in current['support_violations']):
+        return True
+    samples = {(v['side'],v['sample']) for v in prior['penetrating_samples']}
+    if any((v['side'],v['sample']) not in samples for v in current['penetrating_samples']):
+        return True
+    depth = current['minimum_sole_clearance_m']
+    old_depth = prior['minimum_sole_clearance_m']
+    return depth is not None and old_depth is not None and depth < min(-SUPPORT_ACCEPTANCE_M,old_depth)-1e-7

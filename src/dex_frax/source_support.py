@@ -43,21 +43,32 @@ def summarize(targets):
 
 
 
-def apply(targets, robot, boxes):
-    """Keep uncertain altitude separate from measured scene support."""
+def apply(targets, robot, boxes, *, infer_gravity=False):
+    """Assign measured and gravity-inferred elevated support before solving."""
     observation = summarize(targets)
     from .scene_support import assign
     assign(targets,robot,observation,boxes)
     unresolved = [item for item in observation['elevated_foot_evidence']
                   if item['legacy_airborne_frames'] >= (item['end']-item['start'])*.5
                   and not item.get('measured_surface')]
+    measured = np.logical_or.reduce([v['platform_index']>=0 for v in targets['sides'].values()])
+    if infer_gravity:
+        from .scene_support import assign_gravity
+        inferred = assign_gravity(targets, robot, unresolved, len(boxes))
+        if inferred:
+            observation['gravity_inferred_platforms'] = inferred
+            unresolved = [item for item in unresolved if 'inferred_surface' not in item]
     targets['source_support_uncertain'] = np.zeros(len(targets['root_p']),dtype=bool)
     for item in unresolved:
         targets['source_support_uncertain'][item['start']:item['end']] = True
     known = np.logical_or.reduce([v['platform_index']>=0 for v in targets['sides'].values()])
+    if observation.get('gravity_inferred_platforms'):
+        targets['source_inferred_platform'] = known & ~measured
     targets['source_scene_support'] = known
     targets['source_airborne'] &= ~(known | targets['source_support_uncertain'])
-    observation['segments']['measured_platform'] = list(stable_segments(known))
+    observation['segments']['measured_platform'] = list(stable_segments(measured))
+    if 'source_inferred_platform' in targets:
+        observation['segments']['gravity_inferred_platform'] = list(stable_segments(targets['source_inferred_platform']))
     observation['segments']['unconfirmed_platform'] = list(stable_segments(targets['source_support_uncertain']))
     observation['unresolved_platforms'] = unresolved
     observation['informational_only'] = not known.any()

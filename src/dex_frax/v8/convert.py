@@ -99,7 +99,8 @@ def convert(bvh,output,source='auto',model=DEFAULT_MODEL,fps=None,config=None,ma
             raise MotionInputError(str(error)) from error
     if source_review is not None or boxes:
         from ..source_support import apply as assign_support
-        support_review = assign_support(t,robot,boxes)
+        infer_gravity = profile=='refine' and refine_flow=='A' and t['source_type']=='lafan' and not no_contacts
+        support_review = assign_support(t,robot,boxes,infer_gravity=infer_gravity)
     else:
         support_review = None
     if source_review is not None:
@@ -107,6 +108,7 @@ def convert(bvh,output,source='auto',model=DEFAULT_MODEL,fps=None,config=None,ma
         source_review['support']=support_review
         from ..cli import atomic_json
         atomic_json(output.with_suffix('.source_review.json'),source_review)
+    inferred_platforms = (support_review or {}).get('gravity_inferred_platforms',[])
     timing=None;source_time=None;joint_indices=None
     timing_archive=None
     if allow_local_slowdown:
@@ -171,9 +173,9 @@ def convert(bvh,output,source='auto',model=DEFAULT_MODEL,fps=None,config=None,ma
     if initial_solver is None:phase('v8_ik')
     x,records=(solve if initial_solver is None else initial_solver)(robot,t,cfg['solver'],lambda i,n:print(f'{output.stem}: {i}/{n} {time.monotonic()-start:.1f}s',flush=True))
     robot.clip_head_angles(x[:, 3:])
-    if boxes:
+    if boxes or inferred_platforms:
         from ..scene_support import fit as fit_scene
-        x = fit_scene(robot,t,x)
+        x = fit_scene(robot,t,x,measured_count=len(boxes))
     stage_times['initial_ik']=time.monotonic()-stage_start
     raw_frax=getattr(initial_solver,'baseline',None)
     if source_time is not None and timing_archive is None and not getattr(initial_solver,'defer_joint_retiming',False):
@@ -377,8 +379,10 @@ def convert(bvh,output,source='auto',model=DEFAULT_MODEL,fps=None,config=None,ma
         'limits':'Kinematic reference only; contact inferred; flat floor assumed; no dynamics/self-collision certification.'}
     if support_review is not None:
         meta['source_support_review']=support_review
-    if boxes:
+    if boxes or inferred_platforms:
         meta['scene_support']=dict(boxes=boxes,sha256=scene_digest)
+        if inferred_platforms:
+            meta['scene_support']['gravity_inferred_platforms']=inferred_platforms
     if source_review is not None:
         meta['source_review']=dict(policy=source_review['policy'], report='motion.source_review.json',
                                    native_frame_count=source_review['frame_count'],

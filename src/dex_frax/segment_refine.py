@@ -15,7 +15,7 @@ from .acceptance import evaluate
 from .adaptive_refine import window_targets
 from .audit_cache import fork
 from .cli import atomic_json, sha
-from .refine_pipeline import measurements, masks, propose, guard, enrich_jobs, repair_limits, normalized_input_frames
+from .refine_pipeline import measurements, masks, propose, guard, enrich_jobs, repair_limits
 from .refine_queue import RECIPES, jobs_from_masks
 from .refine_routing import collision_groups
 from .unified_repair import quality_guard
@@ -257,7 +257,7 @@ def refine(robot, targets, meta, payload, path, initial_solver, budget, *,
     solver_seconds = limits['v8_segment_seconds']
     plugin_seconds = limits['specialist_candidate_seconds']
     began = time.monotonic()
-    end = deadline if deadline is not None else began+(.5*normalized_input_frames(meta,len(out)) if budget is None else budget)
+    end = deadline if deadline is not None else began + (float('inf') if budget is None else budget)
     attempts = list(previous_attempts or ())
     parent_hash = sha(path)
     def audit(rows,quats,changed,trial):

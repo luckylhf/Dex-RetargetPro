@@ -283,7 +283,7 @@ def batch(args):
     started=time.perf_counter();records=[]
     for row in cases:
         record=dict(case=row['id'],status='budget_not_run')
-        if time.perf_counter()-started < args.budget:
+        if args.budget is None or time.perf_counter()-started < args.budget:
             case=argparse.Namespace(input=manifest_path.parent/row['input'],output=out/row['id'],
                 source=row['source'],mode=args.mode,iterations=args.iterations,
                 ground_running=row.get('ground_running', False),
@@ -307,7 +307,7 @@ def batch(args):
 def main():
     parser = argparse.ArgumentParser(description="Dex retargeting: complete fast conversion or window-based refine")
     refine_flow_help = (f'Default {DEFAULT_REFINE_FLOW} in refine mode. '
-                        'A is the 0.8.4 specialist-order baseline. '
+                        'A combines the specialist queue with residual jitter repair. '
                         'B tests the 1.0.4 cascade and C tests support-phase windows.')
     sub = parser.add_subparsers(dest="command", required=True)
     conv = sub.add_parser("convert")
@@ -327,10 +327,10 @@ def main():
     conv.add_argument('--allow-local-slowdown',action=argparse.BooleanOptionalAction,default=None,
                       help='Refine defaults to local frame insertion for motor-speed violations; disable to preserve timing')
     conv.add_argument('--repair-budget',type=_repair_budget_arg,metavar='SECONDS|unlimited',
-                      help='Shared repair seconds or unlimited (default: 0.5 × whole input frames at 50 Hz)')
+                      help='Shared repair seconds or unlimited (refine default: unlimited)')
     conv.add_argument('--refine-flow', choices=REFINE_FLOWS,
                       help=refine_flow_help)
-    conv.add_argument('--budget',type=float,default=86400.,help='Total seconds including preparation, IK, repair and final audit')
+    conv.add_argument('--budget',type=float,help='Total seconds including preparation, IK, repair and final audit (refine default: unlimited)')
     conv.add_argument("--iterations", type=int, default=8)
     conv.add_argument("--initial-iterations", type=int, default=100)
     conv.add_argument("--max-frames", type=int)
@@ -352,10 +352,10 @@ def main():
     batching.add_argument('--allow-local-slowdown',action=argparse.BooleanOptionalAction,default=None,
                           help='Refine defaults to local frame insertion for motor-speed violations')
     batching.add_argument('--repair-budget',type=_repair_budget_arg,metavar='SECONDS|unlimited',
-                          help='Shared repair seconds per motion or unlimited (default: 0.5 × whole input frames at 50 Hz)')
+                          help='Shared repair seconds per motion or unlimited (refine default: unlimited)')
     batching.add_argument('--refine-flow', choices=REFINE_FLOWS,
                           help=refine_flow_help)
-    batching.add_argument('--budget',type=float,default=1800.,help='Total seconds; stop owned workers when exhausted in any batch mode')
+    batching.add_argument('--budget',type=float,help='Total batch seconds; stop owned workers when exhausted (refine default: unlimited)')
     batching.add_argument('--workers',default='auto',help='Maximum worker slots; memory admission may use fewer')
     batching.add_argument('--resource-mode',choices=['dynamic','manual'],default='dynamic',help='Dynamic host-load admission by default; manual retains fixed resource settings')
     batching.add_argument('--memory-target-percent',type=float,default=90.,help='Dynamic mode host used-memory ceiling, including other programs and the system')
@@ -395,6 +395,8 @@ def main():
     preview.add_argument("--fps", type=int, default=25)
     args = parser.parse_args()
     if args.command in ('convert','batch'):
+        if args.mode == 'fast' and args.budget is None:
+            args.budget = 86400. if args.command == 'convert' else 1800.
         if args.refine_flow is not None and args.mode != 'refine':
             parser.error('--refine-flow requires --mode refine')
         args.refine_flow = args.refine_flow or DEFAULT_REFINE_FLOW
@@ -445,7 +447,8 @@ def main():
             parser.error('--grounding applies only to SMPL-X input')
         if min(args.iterations, args.initial_iterations) < 1 or (args.max_frames is not None and args.max_frames < 3):
             parser.error("Iteration counts must be positive; max-frames must be >= 3")
-        if not math.isfinite(args.budget) or args.budget<=0:parser.error('Budget must be finite and positive')
+        if args.budget is not None and (not math.isfinite(args.budget) or args.budget<=0):
+            parser.error('Budget must be finite and positive')
         from .input_errors import MotionInputError
         try:
             if args.mode=='auto':record=single_auto(args)
@@ -464,7 +467,7 @@ def main():
             parser.error('Resource wait must be finite and nonnegative')
         if args.completion_worker_gib is not None and (not math.isfinite(args.completion_worker_gib) or args.completion_worker_gib<=0):
             parser.error('Completion worker budget must be finite and positive')
-        if any(not math.isfinite(v) or v<=0 for v in values):
+        if any(not math.isfinite(v) or v<=0 for v in values if v is not None):
             parser.error('Batch iteration counts and budgets must be finite and positive')
         if args.worker_resident_gib>args.worker_peak_gib:parser.error('Resident memory cannot exceed cold-worker peak')
         if not 50<=args.memory_target_percent<=95:parser.error('Memory target percent must be between 50 and 95')

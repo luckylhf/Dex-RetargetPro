@@ -13,7 +13,7 @@ import tempfile
 import time
 from pathlib import Path
 import numpy as np
-from .airborne import protected_height
+from .airborne import airborne_mask, protected_height
 from .contract import DEFAULT_REFINE_FLOW, LEGACY_CHECKPOINT_FLOW, REFINE_FLOWS, UNLIMITED_REPAIR_BUDGET
 from osqp import OSQPException
 from scipy.spatial.transform import Rotation
@@ -24,7 +24,7 @@ from .refine_queue import WorkQueue,jobs_from_masks,time_sliced
 from .refine_routing import (LEGACY_SAFETY_ORDER, SAFETY_ORDER, WINDOW_POSE, alignment_reference,
                              checked_geometry_frames, clearance_trial_family, collision_groups, collision_masks,
                              core_frames, dependencies, group_jitter_jobs, movable_submodel,
-                             coupled_leg_window, next_window_job, ready_jobs, stalled_window, submodel, window_jobs)
+                             coupled_leg_window, leg_phase_repair, next_window_job, ready_jobs, stalled_window, submodel, window_jobs)
 from .unified_repair import quality_guard,dense_geometry,collision_seams,arm_window_pending
 from .similarity import palm_envelope,score
 from .temporal_constraints import root_speed_bounds
@@ -37,9 +37,19 @@ POLICY=dict(name='geometry_before_temporal_v8',core_frames=101,padding_frames=20
             context_padding_frames=[20,50,100],neighbor_reactivations=None,final_fresh_audit=True,
             shared_safety_kernel=['support','dense_floor','leg_collision'],swept_geometry_steps=8,
             short_safety_core_frames=21,short_temporal_core_frames=11,jitter_guard='per_joint_and_union')
-LEGACY_POLICY=dict(POLICY, name='joint_safety_before_pose_default_v7')
+A_POLICY=dict(POLICY, name='specialists_then_residual_jitter_v1')
 WINDOW_POLICY=dict(POLICY, name='alternating_support_phase_windows_v6')
 COUPLED_LEGS='coupled_leg_clearance'
+PHASE_LEGS=('phase_leg_clearance','phase_leg_rollback')
+PLATFORM_PHASE=('platform_phase','platform_leg_only')
+PELVIS_CONTACT_RESTORE='pelvis_contact_restore'
+FOOT_GEOMETRY='foot_geometry_nonlinear'
+SUPPORT_LEG_RECIPES={
+    'ground_left_leg':('grounded_leg_windows','Left'),
+    'ground_right_leg':('grounded_leg_windows','Right'),
+    'swing_left_leg':('inferred_swing_leg_windows','Left'),
+    'swing_right_leg':('inferred_swing_leg_windows','Right'),
+}
 
 
 def repair_limits():
@@ -211,7 +221,7 @@ def guard(robot,t,before,after,original,old_m,new_m,old_q,new_q,old_cache,new_ca
         owned=owned_pairs(model,job['hand_leg_pair_ids'],joint=='cooperate') if joint else collision_groups(model)[stage]
         old_m['owned_collision_deficit']=float(np.maximum(-old_d[:,owned],0.).sum())
         new_m['owned_collision_deficit']=float(np.maximum(-new_d[:,owned],0.).sum())
-    if stage in ('leg_collision','jitter') or joint or job.get('restore_support_deficit'):
+    if stage in ('leg_collision','jitter') or joint or job.get('restore_support_deficit') or job.get('grounded_leg_repair'):
         from .protected_collision_route import slide_guard
         slip = slide_guard(t,old_cache,new_cache,lo,hi)
         if slip:return slip
@@ -282,13 +292,83 @@ def improved(stage,side,a,b,old,new,old_m,new_m,*,jitter_joints=()):
         or np.maximum(-new_m['floor'][a:b]-.001,0.).sum()<np.maximum(-old_m['floor'][a:b]-.001,0.).sum()-1e-7)
 
 
+def phase_leg_fit(robot,t,out,weights,model,job,recipe,deadline,progress):
+    from .adaptive_refine import MinimumChangeObjective
+    a,b=job['phase_leg_window']
+    legs=[column for side in robot.sides.values() for column in side['leg']]
+    flight=job['leg_phase']=='flight'
+    ids=legs if flight else [2,*legs]
+    protected=protected_height(t,len(out))
+    if flight:
+        protected=protected & ~t['reconstructible_flight']
+    guide=out
+    if recipe=='phase_leg_rollback':
+        guide=out.copy()
+        grid=np.arange(a,b)
+        core_start=max(a+2,job['core_start'])
+        core_end=min(b-3,job['core_end']-1)
+        core_end=max(core_start,core_end)
+        entering=np.maximum(0.,(grid-a-1)/max(1,core_start-a-1))
+        leaving=np.maximum(0.,(b-2-grid)/max(1,b-2-core_end))
+        weight=np.minimum(1.,np.minimum(entering,leaving))
+        weight=np.sin(weight*np.pi/2.)**2
+        weight[protected[a:b]]=0.
+        window=np.ix_(grid,ids)
+        guide[window]+=weight[:,None]*(t['raw_phase_reference'][window]-out[window])
+    options=dict(weights,_pelvis_height_only=True,_coupled_swept_support=True,_coupled_leg_clearance=True,
+                 _preserve_support_step=True,_phase_elastic_search=not flight,
+                 _initial_leg_collision_cfg=model.cfg,_repair_deadline=deadline-2.5,
+                 _local_fit_progress=progress)
+    fitted,detail=fit_window(robot,t,out,options,a,b,15,ids_override=ids,local_checks=True,
+                            allow_support=True,seed=None if guide is out else guide,
+                            objective_factory=lambda i:MinimumChangeObjective(guide[i]),
+                            protected_frames=protected[a:b],flight_legs_only=flight)
+    detail.update(policy=recipe,phase=job['leg_phase'],window=[a,b],movable_joint_columns=ids)
+    return fitted,detail
+
+
+def platform_phase_fit(robot,t,out,weights,model,job,recipe,deadline,progress):
+    from .adaptive_refine import MinimumChangeObjective
+    a,b=job['platform_window']
+    indices=[foot['platform_index'] for foot in t['sides'].values()]
+    measured=t['inferred_platform_start']
+    inferred=np.logical_or.reduce([index>=measured for index in indices])
+    measured_contact=np.logical_or.reduce([(index>=0)&(index<measured) for index in indices])
+    mutable=inferred & ~measured_contact & ~airborne_mask(t,len(out)) & ~np.asarray(t.get('source_support_uncertain',False),bool)
+    scene=np.asarray(t.get('source_scene_support',False),bool)
+    targets=dict(t,source_scene_support=scene & ~mutable,_inferred_platform_repair=measured)
+    protected=protected_height(targets,len(out)) | measured_contact
+    ids=[2]+[column for side in robot.sides.values() for column in side['leg']]
+    if recipe=='platform_leg_only':
+        ids=robot.sides[job['side']]['leg']
+        protected |= t['sides'][job['side']]['contact']>0
+    options=dict(weights,_pelvis_height_only=True,_coupled_swept_support=True,
+                 _preserve_support_step=True,_temporal_repair_gain=1.3,_phase_elastic_search=True,
+                 _initial_leg_collision_cfg=model.cfg,_repair_deadline=deadline-2.5,
+                 _local_fit_progress=progress)
+    fitted,detail=fit_window(robot,targets,out,options,a,b,9,ids_override=ids,local_checks=True,
+                            allow_support=True,objective_factory=lambda i:MinimumChangeObjective(out[i]),
+                            protected_frames=protected[a:b])
+    detail.update(policy=recipe,window=[a,b],movable_joint_columns=list(ids),
+                  _platform_protected_frames=protected)
+    return fitted,detail
+
+
 def propose(robot,t,out,original,weights,model,job,recipe,deadline,progress=None,unfixed_waist=None):
     a,b=job['start'],job['end'];stage=job['module'];side=job['side'];n=len(out)
     local=window_targets(t,a,b,n);cfg=dict(weights,_repair_deadline=deadline,_pelvis_height_only=True);candidate=out.copy();detail={}
     progress={} if progress is None else progress
-    if recipe==PELVIS_CONTACT:
+    if recipe in PHASE_LEGS:
+        return phase_leg_fit(robot,t,out,weights,model,job,recipe,deadline,progress)
+    if recipe in PLATFORM_PHASE:
+        return platform_phase_fit(robot,t,out,weights,model,job,recipe,deadline,progress)
+    if recipe in (PELVIS_CONTACT,PELVIS_CONTACT_RESTORE,FOOT_GEOMETRY):
         from .pelvis_contact import propose as settle
-        rows,rotations,detail=settle(robot,t,out,job,deadline)
+        rows,rotations,detail=settle(robot,t,out,job,deadline,
+                                    restore_violations=recipe==PELVIS_CONTACT_RESTORE,
+                                    foot_geometry=recipe==FOOT_GEOMETRY)
+        if recipe==FOOT_GEOMETRY:
+            return rows,detail
         return rows,dict(detail,_pelvis_rotations=rotations)
     if recipe=='coupled_body_support':
         from .contact_phase import body_proposal
@@ -322,16 +402,27 @@ def propose(robot,t,out,original,weights,model,job,recipe,deadline,progress=None
         digits=''.join(c for c in recipe if c.isdigit())
         tier=float(digits) if digits else (10. if recipe.endswith('more') else 5.)
         cfg.update(_restore_geometry=True,_safety_joint_deg=tier,_safety_reference=original,_local_fit_progress=progress)
+        support_leg = SUPPORT_LEG_RECIPES.get(recipe)
+        residual_only = support_leg is not None
+        if residual_only:
+            cfg['_restore_violations_only'] = True
         ids=np.asarray([2]+sum([g['leg'] for g in robot.sides.values()],[]))
         from .local_geometry import project_root_height
         protected = protected_height(t,n)[a:b]
-        vertical=project_root_height(robot,t,out,a,b,protected_frames=protected)
+        if support_leg is not None:
+            window_key,moving_side=support_leg
+            ids=np.asarray(robot.sides[moving_side]['leg'])
+            protected = protected & ~t[window_key][moving_side][a:b]
+            cfg['_preserve_support_step'] = True
+        vertical=None if residual_only else project_root_height(robot,t,out,a,b,protected_frames=protected)
         seed=vertical[0] if vertical is not None else None
         candidate,detail=fit_window(robot,t,out,cfg,a,b,24,ids_override=ids,seed=seed,
             local_checks=True,allow_support=True,objective_factory=lambda i:MinimumChangeObjective(out[i]),
             protected_frames=protected)
         detail.update(policy='shared_native_swept_support_geometry_v1',tier_deg=tier,
                       movable_joint_columns=ids.tolist())
+        if support_leg is not None:
+            detail.update(support_evidence=window_key,moving_side=moving_side)
         return candidate,detail
     progress={} if progress is None else progress
     cfg['_branch_progress']=progress.setdefault('branches',{})
@@ -464,11 +555,11 @@ def propose(robot,t,out,original,weights,model,job,recipe,deadline,progress=None
     return candidate,detail
 
 
-def enrich_jobs(pending, t, robot, cache, model, *, legacy_order=False):
+def enrich_jobs(pending, t, robot, cache, model, *, default_a=False):
     """Select the applicable contact, arm and collision recipes for the audited trajectory."""
     samples = cache['full_collision']['samples']
     for job in pending:
-        if job['module']=='leg_collision' and not legacy_order:
+        if job['module']=='leg_collision':
             a,b=job['core_start'],job['core_end']
             pairs={tuple(model.names[k]) for _,_,ids in samples[max(0,8*a-7):8*b] for k in ids}
             hips = {side for side in ('l','r') for pair in pairs
@@ -482,22 +573,35 @@ def enrich_jobs(pending, t, robot, cache, model, *, legacy_order=False):
             # together; avoid a support-only proposal that immediately
             # fails the common geometry guard. No new candidate family.
             job['candidate_order']=['geometry5_elastic','geometry10_elastic']
-        if job['module']=='body' and not legacy_order:
+        if default_a and job['module'] in ('support','dense_floor','leg_collision'):
+            from .refine_queue import RECIPES
+            order = job.get('candidate_order',RECIPES[job['module']])
+            a,b=job['core_start'],job['core_end']
+            key='inferred_swing_leg_windows' if job['module']=='leg_collision' else 'grounded_leg_windows'
+            windows=t.get(key,{})
+            ground=[recipe for recipe,(basis,side) in SUPPORT_LEG_RECIPES.items()
+                    if basis==key and side in windows and windows[side][a:b].any()]
+            foot_geometry=[FOOT_GEOMETRY] if job['module'] in ('support','dense_floor') else []
+            job['candidate_order']=[*ground,*foot_geometry,*order]
+        if job['module']=='body':
             from .contact_phase import has_joint_support
             if has_joint_support(t,job['core_start'],job['core_end']):
                 job['joint_support']=True
-                job['candidate_order']=[PELVIS_CONTACT,'coupled_body_support','solve','solve_more']
+                if default_a:
+                    job['restore_support_deficit']=True
+                    job['candidate_order']=['coupled_body_support',PELVIS_CONTACT_RESTORE,PELVIS_CONTACT,'solve','solve_more']
+                else:
+                    job['candidate_order']=[PELVIS_CONTACT,'coupled_body_support','solve','solve_more']
         if job['module']=='arms':
             errors=cache['metrics']['errors'][job['side']];a,b=job['core_start'],job['core_end']
             # Large direction errors deserve a branch trial before repeated
             # small local steps. This orders search; it changes no gate.
             if max(np.percentile(errors[k][a:b],95) for k in ('upper','lower'))>2*policy()['arm_direction_deg']:
                 job['candidate_order']=['current_best','guided_current','original_frax','guided_original','fit']
-            if not legacy_order:
-                from .contact_phase import supported_arm_span
-                if len(supported_arm_span(robot,t,job['side'],a,b)):
-                    order=job.get('candidate_order',['fit','current_best','guided_current','original_frax','guided_original'])
-                    job['candidate_order']=['surface_support_pose',*order]
+            from .contact_phase import supported_arm_span
+            if len(supported_arm_span(robot,t,job['side'],a,b)):
+                order=job.get('candidate_order',['fit','current_best','guided_current','original_frax','guided_original'])
+                job['candidate_order']=['surface_support_pose',*order]
     from .hand_leg_repair import attach
     return attach(pending,samples,model)
 
@@ -511,7 +615,7 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
         raise ValueError(f'Unknown refine flow: {refine_flow}')
     legacy_order = refine_flow == 'A'
     window_order = refine_flow == 'C'
-    repair_policy = WINDOW_POLICY if window_order else LEGACY_POLICY if legacy_order else POLICY
+    repair_policy = WINDOW_POLICY if window_order else A_POLICY if legacy_order else POLICY
     safety_order = LEGACY_SAFETY_ORDER if legacy_order else SAFETY_ORDER
     if legacy_order:
         v8_candidates = segment_cascade = False
@@ -546,13 +650,16 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
     quality=evaluate(path,meta,solve,'frax',cache=cache);before=copy.deepcopy(quality)
     # Initial and final independent audits sit outside the shared repair clock.
     total_frames_50hz = normalized_input_frames(meta, len(payload['dof_pos']))
-    budget_source = 'default_full_input_50hz' if repair_budget is None else 'explicit'
-    budget_policy = 'shared_wall_time'
+    budget_source = 'explicit'
+    if repair_budget is None:
+        if meta.get('profile') == 'fast':
+            repair_budget = .5 * total_frames_50hz
+            budget_source = 'default_full_input_50hz'
+        else:
+            budget_source = 'default_unlimited'
     if repair_budget == UNLIMITED_REPAIR_BUDGET:
-        budget_policy = UNLIMITED_REPAIR_BUDGET
         repair_budget = None
-    elif repair_budget is None:
-        repair_budget = .5 * total_frames_50hz
+    budget_policy = UNLIMITED_REPAIR_BUDGET if repair_budget is None else 'shared_wall_time'
     elapsed_before_resume = 0.
     if resume_same_round and resume_state is not None:
         elapsed_before_resume = float(resume_state['elapsed_s'])
@@ -566,17 +673,57 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
     repair_started = time.monotonic()
     deadline = float('inf') if available_seconds is None else repair_started + available_seconds
     limits = repair_limits()
+    configured_order = limits.pop('a_order','serial')
+    a_order = configured_order if legacy_order else 'serial'
+    if a_order not in ('serial','budgeted','phase'):
+        raise ValueError(f'Unknown A specialist order: {a_order}')
+    phase_order = window_order or a_order=='phase'
+    phase_combinations = a_order=='phase'
+    specialist_deadline = deadline
+    ground_deadline = deadline
+    if a_order!='serial' and available_seconds is not None:
+        # Isolated geometry work must give the final jitter pass a time slice.
+        if 'conversion_added_jitter' in quality['flags'] and (repair_modules is None or 'jitter' in repair_modules):
+            specialist_deadline -= .25 * available_seconds
+        ground_deadline = min(specialist_deadline,repair_started+min(50.,available_seconds/15.))
     specialist_elapsed = 0.
     t=copy.deepcopy(targets);t['source_root_r']=t['root_r'];t['root_r']=Rotation.from_quat(payload['root_rot']).as_matrix()
+    if legacy_order and meta.get('source_type') in ('lafan','soma','mocap') and 'source_time_s' in payload:
+        from .refine_platform import grounded_leg_windows
+        t['grounded_leg_windows']=grounded_leg_windows(t,meta,payload['source_time_s'])
+        scene = meta.get('scene_support') or {}
+        if scene.get('gravity_inferred_platforms'):
+            measured_count = len(scene['boxes'])
+            t['inferred_platform_start']=measured_count
+            t['inferred_swing_leg_windows'] = {}
+            for side,other in (('Left','Right'),('Right','Left')):
+                available = ((t['sides'][other]['platform_index']>=measured_count)
+                             & (t['sides'][side]['platform_index']<0))
+                t['inferred_swing_leg_windows'][side] = available
+                ground = available & (t['sides'][side]['contact']>0)
+                t['grounded_leg_windows'][side] = t['grounded_leg_windows'].get(side,False) | ground
+        elif (meta.get('source_type')=='lafan' and 'scene_support_unconfirmed' in quality['flags']
+              and (quality.get('full_self_collision') or {}).get('collision_samples')):
+            from .refine_platform import inferred_swing_leg_windows
+            t['inferred_swing_leg_windows']=inferred_swing_leg_windows(t,payload['source_time_s'])
     original=np.c_[payload['root_pos'],payload['dof_pos']].astype(float);out=original.copy()
     trusted_support=np.zeros(len(out),bool)
-    if window_order:
+    if phase_combinations:
+        flight=airborne_mask(t,len(out))
+        t['reconstructible_flight']=(flight & ~np.asarray(t.get('source_support_uncertain',False),bool)
+                                    & ~np.asarray(t.get('source_scene_support',False),bool))
+        foot_support=np.logical_or.reduce([foot['contact']>0 for foot in t['sides'].values()])
+        phase_padding=max(3,round(t['fps']*.25))
+    if phase_order:
         from .support_quality import preserve_contact
         for contact in t.get('body_contacts',()):
             for frame in np.flatnonzero(contact['mode']):
                 trusted_support[frame] |= preserve_contact(contact,frame)
         phase=np.column_stack([trusted_support,*[foot['phase'] for foot in t['sides'].values()]])
         phase_edges=np.r_[0,np.flatnonzero(np.any(phase[1:]!=phase[:-1],axis=1))+1,len(out)]
+        if phase_combinations:
+            changed_flight=np.flatnonzero(np.diff(t['reconstructible_flight']))+1
+            repair_phase_edges=np.union1d(phase_edges,changed_flight)
     baseline=path.parent/'frax_baseline';baseline.mkdir(exist_ok=False)
     for item in path.parent.glob('motion.*'):
         if item.is_file():shutil.copyfile(item,baseline/item.name)
@@ -591,8 +738,16 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
         payload=saved
         t['root_r']=Rotation.from_quat(payload['root_rot']).as_matrix()
     baseline_sha=sha(baseline/'motion.pkl')
+    raw_reference=baseline/'motion.raw_frax.npz'
+    if phase_combinations and raw_reference.is_file():
+        with np.load(raw_reference,allow_pickle=False) as raw:
+            raw_rows=raw['x']
+            if (raw_rows.shape==out.shape and np.isfinite(raw_rows).all()
+                    and float(raw['fps'])==t['fps']
+                    and np.array_equal(raw['root_r'],t['source_root_r'])):
+                t['raw_phase_reference']=raw_rows
     queue=WorkQueue(None if resume_state is None else resume_state['states'],
-                    retry_timed=resume_state is not None,distinct_contexts=window_order)
+                    retry_timed=resume_state is not None,distinct_contexts=phase_order)
     attempts = [] if resume_state is None or resume_recheck else resume_state['attempts']
     kept = 0 if resume_state is None or resume_recheck else resume_state['kept_candidates']
     model=CollisionModel(robot,dict(meta['configuration'].get('self_collision') or {},coverage='full'))
@@ -685,7 +840,19 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
                                active_movable_support=bool(state[a].any()),severity=min(job['severity'],b-a))
 
     def jobs(include_all=False):
-        pending=jobs_from_masks(masks(quality,cache,robot,groups,torso_reference,source_pose=v8_candidates or segment_cascade),len(out),POLICY['core_frames'],POLICY['padding_frames'])
+        findings=masks(quality,cache,robot,groups,torso_reference,source_pose=v8_candidates or segment_cascade)
+        platform=quality.get('inferred_platform_support')
+        if 'inferred_platform_start' in t and platform is not None:
+            for side in robot.sides:
+                mask=np.zeros(len(out),bool)
+                for entry in platform['support_violations']:
+                    if entry['side']==side:mask[entry['frame']]=True
+                for entry in platform['penetrating_samples']:
+                    if entry['side']==side:
+                        i,part=divmod(entry['sample'],8)
+                        mask[i:i+1+bool(part)]=True
+                if mask.any():findings.append(('support',side,mask))
+        pending=jobs_from_masks(findings,len(out),POLICY['core_frames'],POLICY['padding_frames'])
         if v8_candidates or segment_cascade:
             pending=list(split_at_support(pending,t))
             torso_limit=20. if torso_reference is None else np.maximum(20.,np.asarray(torso_reference)+.02)
@@ -695,27 +862,50 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
             pending = [job for job in pending if job['module']!='jitter']
         if repair_modules is not None and not include_all:
             pending=[job for job in pending if job['module'] in repair_modules]
-        pending=enrich_jobs(pending,t,robot,cache,model,legacy_order=legacy_order)
-        if window_order:
+        pending=enrich_jobs(pending,t,robot,cache,model,default_a=legacy_order)
+        if phase_order:
             pending=group_jitter_jobs(pending,robot)
             leg_mask=collision_masks(cache['full_collision']['samples'],groups,len(out))['leg_collision']
             floor_mask=np.zeros(len(out),bool)
             for i in quality['interpolated_floor']['violating_intervals']:
                 floor_mask[i:i+2]=True
+            if phase_combinations:
+                support_error=floor_mask | (current['contact']>.001)
             for job in pending:
+                if phase_combinations and job['module']=='support' and job['side'] in robot.sides:
+                    a,b=job['core_start'],job['core_end']
+                    job['platform_window']=[max(0,a-phase_padding),min(len(out),b+phase_padding)]
+                    job['candidate_order']=list(PLATFORM_PHASE)
+                    continue
                 if job['module']=='leg_collision':
                     a,b=job['core_start'],job['core_end']
                     window=coupled_leg_window(a,b,leg_mask,floor_mask,trusted_support,phase_edges)
                     if window is not None:
                         job['coupled_leg_window']=window
                         job['candidate_order']=[COUPLED_LEGS,*job['candidate_order']]
+                    if phase_combinations and 'hip_roll_joint' not in job:
+                        route=leg_phase_repair(a,b,leg_mask,support_error,
+                                               t['reconstructible_flight'],foot_support,repair_phase_edges,phase_padding)
+                        if route is not None:
+                            job['leg_phase'],job['phase_leg_window']=route
+                            order=list(PHASE_LEGS if 'raw_phase_reference' in t else PHASE_LEGS[:1])
+                            if job['leg_phase']=='flight':
+                                order.reverse()
+                            job['candidate_order']=[*order,*job['candidate_order']]
                 if job['module']=='body' and job.get('joint_support'):
                     job['restore_support_deficit']=True
-                    job['candidate_order']=['coupled_body_support',PELVIS_CONTACT,'solve','solve_more']
+                    if window_order:
+                        job['candidate_order']=['coupled_body_support',PELVIS_CONTACT,'solve','solve_more']
                 if job['module']=='arms' and 'candidate_order' in job:
                     order=job['candidate_order']
                     if order[0]!='surface_support_pose' and 'fit' in order:
                         job['candidate_order']=['fit',*(recipe for recipe in order if recipe!='fit')]
+                if a_order=='phase' and FOOT_GEOMETRY in job.get('candidate_order',()):
+                    a,b=job['core_start'],job['core_end']
+                    floor=cache['floor'][8*a:8*(b-1)+1].min()
+                    if floor<-.004 or current['contact'][a:b].max()>.004:
+                        order=job['candidate_order']
+                        job['candidate_order']=[recipe for recipe in order if recipe!=FOOT_GEOMETRY]+[FOOT_GEOMETRY]
         if v8_candidates:
             from .refine_queue import RECIPES
             for job in pending:
@@ -727,7 +917,7 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
         return queue.configure(pending,np.c_[out,payload['root_rot']])
     def eligible(pending):
         cm=collision_masks(cache['full_collision']['samples'],groups,len(out))
-        if window_order:
+        if phase_order:
             body_support_error=np.zeros(len(out),bool)
             body_support_error[(quality.get('body_support') or {}).get('violating_frames',[])]=True
             checked=checked_geometry_frames([*prior_attempts,*attempts],len(out))
@@ -815,7 +1005,7 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
     from .temporal_repair import ANGULAR,JITTER,FLAGS,Repair,final_guard
     airborne=protected_height(t,len(out))
 
-    def run_temporal():
+    def run_temporal(*, jitter_only=False):
         from .discontinuities import Discontinuities
         from .inserted_frame_repair import impulse_regression
         from . import swept_height
@@ -825,10 +1015,12 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
         requested = set(quality['flags']) & FLAGS
         if repair_modules is not None:
             requested = {flag for flag in requested if ('jitter' if flag==JITTER else 'root_angular') in repair_modules}
-        discontinuities_enabled = (bool(quality['flags']) and
+        if jitter_only:
+            requested &= {JITTER}
+        discontinuities_enabled = (not jitter_only and bool(quality['flags']) and
                           (repair_modules is None or 'discontinuities' in repair_modules))
         remaining_flags = set(quality['flags'])
-        near_floor = (swept_height.FLAG in remaining_flags and remaining_flags <= (FLAGS|{swept_height.FLAG})
+        near_floor = (not jitter_only and swept_height.FLAG in remaining_flags and remaining_flags <= (FLAGS|{swept_height.FLAG})
                       and (repair_modules is None or 'dense_floor' in repair_modules))
         result = dict(stage='after_geometry_and_segment_solvers', requested=sorted(requested),
                       before_jitter_frames=len(quality['temporal_quality']['violating_frames']),
@@ -855,8 +1047,8 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
                 result=dict(changed_frames=int(len(changed)),kept=False)
                 if not len(changed):
                     return result
-                if not (np.array_equal(rows[airborne],out[airborne]) and
-                        np.array_equal(temporal.quaternions[airborne],payload['root_rot'][airborne])):
+                if (temporal.protected_pose_changed(out,rows,0,len(rows)) or
+                        not np.array_equal(temporal.quaternions[airborne],payload['root_rot'][airborne])):
                     raise RuntimeError('Temporal proposal changed protected airborne frames')
                 data=dict(payload,root_pos=rows[:,:3].astype(np.float32),
                           dof_pos=rows[:,3:].astype(np.float32),root_rot=temporal.quaternions)
@@ -886,11 +1078,15 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
             contact = meta['configuration'].get('contact',{})
             t['body_contact_anchor_tolerance_m'] = float(contact.get('max_anchor_excursion_m',.035))*meta['leg_scale']
             window_seconds = limits['specialist_candidate_seconds']
-            temporal = Repair(robot,t,diagnostics,out.copy(),payload['root_rot'].copy(),model,cutoff)
+            temporal = Repair(robot,t,diagnostics,out.copy(),payload['root_rot'].copy(),model,cutoff,
+                              allow_unconfirmed_arm_jitter=jitter_only)
             residual_windows = []
             if JITTER in requested:
                 temporal.deadline = min(cutoff, time.monotonic()+window_seconds)
-                temporal.jitter()
+                if jitter_only:
+                    temporal.jitter(preserve_contact_edges=True)
+                else:
+                    temporal.jitter()
                 temporal.deadline = cutoff
                 if time.monotonic()<cutoff:
                     from .sparse_jitter import finish
@@ -1035,14 +1231,15 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
         contact=meta['configuration'].get('contact',{})
         t['body_contact_anchor_tolerance_m']=float(contact.get('max_anchor_excursion_m',.035))*meta['leg_scale']
         ground_report=None
-        if (not continuing_segments and segment_cascade and time.monotonic()<deadline
+        needs_ground_settle = legacy_order and bool(quality['interpolated_floor']['samples_below_minus_1mm'])
+        if (not continuing_segments and (segment_cascade or needs_ground_settle) and time.monotonic()<ground_deadline
                 and (repair_modules is None or 'ground_settle' in repair_modules)):
             from . import ground_settle as gs
             from .segment_refine import segment_guard
             times=np.asarray(payload.get('source_time_s',np.arange(len(out))/t['fps']))
             source,basis=gs.source_clearance(meta,t,times)
             ground_jobs,minimum,counts=gs.episodes(source,cache['floor'],t)
-            if window_order:
+            if phase_order:
                 ground_jobs=[job for job in ground_jobs
                              if trusted_support[job['core_start']:job['core_end']].any()]
                 counts['trusted_body_support_windows']=len(ground_jobs)
@@ -1053,19 +1250,19 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
             # C already runs a contact-aware joint fit in the specialist
             # queue. Only the inexpensive vertical proposal runs ahead of it.
             methods=('vertical_lift_and_settle',)
-            if not window_order or repair_modules is not None and 'body' not in repair_modules:
+            if not phase_order or repair_modules is not None and 'body' not in repair_modules:
                 methods+=('support_joint_ik',)
             ground_report=dict(policy='source_and_robot_penetration_first_v1',source=basis,evidence=counts,
                                first_phase=True,evidence_file=evidence_path.name,segments=ground_jobs,
                                candidate_order=list(methods))
             for job in ground_jobs:
                 job.update(solver='plugin',status='not_attempted',reason='shared_budget_exhausted')
-                if time.monotonic()>=deadline:
+                if time.monotonic()>=ground_deadline:
                     continue
                 a,b,lo,hi=(job[k] for k in ('core_start','core_end','start','end'))
                 # Keep one full, unmodified parent until the complete core and its joins pass.
                 started_trial=time.monotonic()
-                local_deadline=min(deadline,started_trial+limits['specialist_candidate_seconds'])
+                local_deadline=min(ground_deadline,started_trial+limits['specialist_candidate_seconds'])
                 job['window_allowance_s']=max(0.,local_deadline-started_trial)
                 job['trials']=[]
                 job['dispatch_index']=next_dispatch()
@@ -1126,10 +1323,10 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
             atomic_json(path.parent/'ground_settle.json',ground_report)
         def run_specialist_trial(*,pose_only=None):
             nonlocal out,payload,quality,cache,current,kept,unfixed_waist
-            if time.monotonic() >= deadline:
+            if time.monotonic() >= specialist_deadline:
                 return False
             pending=jobs();ready,blocked=eligible(pending)
-            if window_order:
+            if phase_order:
                 if pose_only is not None:
                     ready=[j for j in ready if (j['module'] in WINDOW_POSE)==pose_only]
                 job=next_window_job(queue,ready,attempts[-1] if attempts else None,attempts=attempts)
@@ -1150,17 +1347,19 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
                 job = min(available,key=priority,default=None)
             else:
                 job = queue.next(ready)
-            if job is None or time.monotonic()>=deadline:
+            if job is None or time.monotonic()>=specialist_deadline:
                 return False
             growth_checkpoint()
             recipe=queue.recipe(job);entry=dict(job,recipe=recipe,status='rejected',dispatch_index=next_dispatch());begin=time.monotonic()
-            before_progress=copy.deepcopy(queue.progress(job)) if window_order else None
-            family=clearance_trial_family(job['module'],recipe) if window_order else None
+            before_progress=copy.deepcopy(queue.progress(job)) if phase_order else None
+            family=clearance_trial_family(job['module'],recipe) if phase_order else None
             if family is not None:
                 entry.update(clearance_family=family,clearance_context=queue.state(job)['context'])
             try:
                 slice_s = limits['specialist_candidate_seconds']
-                local_deadline = min(deadline, begin + slice_s)
+                if recipe in PLATFORM_PHASE or (recipe in PHASE_LEGS and job['leg_phase']=='support'):
+                    slice_s *= 2
+                local_deadline = min(specialist_deadline, begin + slice_s)
                 entry['window_allowance_s'] = max(0., local_deadline - begin)
                 local_model=model if recipe.startswith('hand_leg') else models.get(job['module'],models.get('collision',model)) if job['module'] in ('collision','leg_collision','torso') else model
                 try:
@@ -1173,16 +1372,37 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
                 if time.monotonic() >= local_deadline:
                     raise TimeoutError('specialist_candidate_deadline')
                 aligned=detail.pop('_aligned_reference',None) if isinstance(detail,dict) else None
-                rotation=detail.pop('_pelvis_rotations',None) if recipe==PELVIS_CONTACT else None
+                platform_protection=detail.pop('_platform_protected_frames',None)
+                rotation=detail.pop('_pelvis_rotations',None) if recipe in (PELVIS_CONTACT,PELVIS_CONTACT_RESTORE) else None
                 entry['detail']=detail
                 candidate=robot.export_rows(candidate).astype(float)
                 # Preserve the complete in-flight pose against all repair stages.
                 constrained_fit = (job['module'] in ('leg_pose','support','dense_floor','leg_collision','jitter')
                                    or job['module']=='arms' and recipe in ('fit','current_best','original_frax',
                                                                           'guided_current','guided_original'))
-                if constrained_fit and not np.array_equal(candidate[airborne],out[airborne]):
+                locked=airborne
+                if platform_protection is not None:
+                    locked=platform_protection
+                    fixed=np.setdiff1d(np.arange(POSE_SIZE),detail['movable_joint_columns'])
+                    if not np.array_equal(candidate[:,fixed],out[:,fixed]):
+                        raise ValueError('platform_repair_changed_protected_joint')
+                if recipe in PHASE_LEGS and job['leg_phase']=='flight':
+                    lo,hi=job['phase_leg_window']
+                    locked=airborne.copy()
+                    locked[lo+2:hi-2] &= ~t['reconstructible_flight'][lo+2:hi-2]
+                    if not np.array_equal(candidate[:,:3],out[:,:3]):
+                        raise ValueError('flight_leg_repair_changed_root')
+                support_leg=SUPPORT_LEG_RECIPES.get(recipe)
+                if support_leg is not None:
+                    window_key,moving_side=support_leg
+                    movable=t[window_key][moving_side]
+                    locked=airborne & ~movable
+                    fixed=np.setdiff1d(np.arange(POSE_SIZE),robot.sides[moving_side]['leg'])
+                    if not np.array_equal(candidate[:,fixed],out[:,fixed]):
+                        raise ValueError('ground_leg_repair_changed_platform_support')
+                if constrained_fit and not np.array_equal(candidate[locked],out[locked]):
                     raise ValueError('candidate_changed_protected_frames')
-                candidate[airborne]=out[airborne]
+                candidate[locked]=out[locked]
                 data=dict(payload,root_pos=candidate[:,:3].astype(np.float32),dof_pos=candidate[:,3:].astype(np.float32))
                 new_targets=None
                 if rotation is not None:
@@ -1197,21 +1417,37 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
                 trial.write_bytes(pickle.dumps(data,protocol=4));description=copy.deepcopy(meta);description['output_sha256']=sha(trial)
                 atomic_json(trial.with_suffix('.json'),description)
                 lo,hi=job['start'],job['end']
-                if recipe==COUPLED_LEGS or (recipe=='coupled_body_support' and job.get('restore_support_deficit')):
+                if recipe in (COUPLED_LEGS,FOOT_GEOMETRY,*PHASE_LEGS,*PLATFORM_PHASE) or (recipe=='coupled_body_support' and job.get('restore_support_deficit')):
                     lo,hi=detail['window']
                 trial_cache=fork(cache,changed=(lo,hi))
                 proposed=evaluate(trial,description,solve,'frax',cache=trial_cache,changed=(lo,hi))
                 newer=measurements(trial_cache,robot)
                 checked_job=dict(job,start=lo,end=hi)
+                if support_leg is not None or recipe in PLATFORM_PHASE:
+                    checked_job['grounded_leg_repair']=True
                 if recipe.startswith('hand_leg'):checked_job['hand_leg_route']=detail['route']
                 if recipe=='surface_support_pose':checked_job=dict(job,surface_support_pose=True)
                 rotation_check={} if new_targets is None else {'new_targets':new_targets}
                 reason=guard(robot,t,out,candidate,reference,current,newer,quality,proposed,cache,trial_cache,model,checked_job,
                              **rotation_check)
+                if reason is None and recipe in PLATFORM_PHASE:
+                    from .inserted_frame_repair import impulse_regression, scene_regression
+                    if impulse_regression(quality,proposed):
+                        reason='root_impulse_regression'
+                    elif scene_regression(quality.get('scene_support'),proposed.get('scene_support')):
+                        reason='measured_scene_regression'
                 if 'leg_shape_tradeoff' in newer:entry['leg_shape_tradeoff']=newer['leg_shape_tradeoff']
                 if reason is None:
                     gain=improved(job['module'],job['side'],lo,hi,quality,proposed,current,newer,
                                   jitter_joints=job.get('jitter_joints',()))
+                    if recipe in PLATFORM_PHASE:
+                        from .v8.support_acceptance import SUPPORT_ACCEPTANCE_M
+                        before_platform=quality['inferred_platform_support']
+                        after_platform=proposed['inferred_platform_support']
+                        before_error=sum(x['error_m']-SUPPORT_ACCEPTANCE_M for x in before_platform['support_violations'])
+                        after_error=sum(x['error_m']-SUPPORT_ACCEPTANCE_M for x in after_platform['support_violations'])
+                        gain=(after_error<before_error-1e-5 or
+                              len(after_platform['penetrating_samples'])<len(before_platform['penetrating_samples']))
                     if job.get('restore_support_deficit'):
                         from .support_quality import support_deficit
                         old_support,new_support=quality['body_support'],proposed['body_support']
@@ -1223,7 +1459,7 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
                                   and new_loss<old_loss-1e-5))
                     if not gain:reason='no_target_metric_improvement'
                 if reason is None:
-                    if window_order:
+                    if phase_order:
                         changed=np.any(candidate!=out,axis=1)
                         if rotation is not None:
                             changed |= np.any(data['root_rot']!=payload['root_rot'],axis=1)
@@ -1250,7 +1486,7 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
                 if family is not None and entry['status']=='rejected' and 'primal infeasible' in entry['reason'].lower():
                     infeasible_clearance.add((job['start'],job['end'],entry['clearance_context'],family))
             queue.complete(job,entry['status']=='kept',timed=entry['status']=='time_slice',recipe=recipe,
-                           unchanged_timeout=window_order and entry['status']=='time_slice'
+                           unchanged_timeout=phase_order and entry['status']=='time_slice'
                            and before_progress==queue.progress(job),
                            result_rows=np.c_[out,payload['root_rot']] if entry['status']=='kept' else None)
             entry['elapsed_s']=time.monotonic()-begin
@@ -1290,7 +1526,7 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
 
         while (quality['flags'] or v8_candidates or segment_cascade) and run_specialist_trial():
             pass
-    temporal_result,discontinuity_report = ({},{}) if legacy_order else run_temporal()
+    temporal_result,discontinuity_report = run_temporal(jitter_only=legacy_order)
     remaining_repair_s = max(0., deadline - time.monotonic())
     shared_budget_exhausted = remaining_repair_s == 0.
     # Independently certify the persisted result for specialist-only or legacy V8 execution.
@@ -1314,7 +1550,8 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
         similarity_mode='soft',budget_s=repair_budget,available_budget_s=available_seconds,
         budget_policy=budget_policy,budget_source=budget_source,
         shared_budget_exhausted=shared_budget_exhausted,
-        full_input_frames_50hz=total_frames_50hz,candidate_limits_s=limits)
+        full_input_frames_50hz=total_frames_50hz,candidate_limits_s=limits,
+        a_order=a_order,temporal_reserve_s=None if available_seconds is None else deadline-specialist_deadline)
     atomic_json(path.parent/'repair.json',report)
     description['unified_repair']=dict(report_path='repair.json',kept_candidates=kept,similarity_mode='soft',status=status)
     description['stage_times_s']['unified_repair']=report['elapsed_s'];description['elapsed_s']+=report['elapsed_s']

@@ -107,6 +107,13 @@ def evaluate(pkl, meta, solve, mode, cache=None, changed=None):
             flags.append('measured_platform_anchor_or_boundary_failed')
         if result['scene_support']['penetrating_samples']:
             flags.append('measured_scene_penetration_over_1mm')
+    inferred = check.get('inferred_platform_support')
+    if inferred is not None:
+        result['inferred_platform_support'] = inferred
+        if inferred['support_violations']:
+            flags.append('inferred_platform_anchor_over_1mm')
+        if inferred['penetrating_samples']:
+            flags.append('inferred_platform_penetration_over_1mm')
     result['root_discontinuities'] = check.get('root_discontinuities')
     if result['root_discontinuities']:
         flags.append('conversion_added_root_discontinuity')

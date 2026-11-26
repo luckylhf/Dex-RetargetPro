@@ -134,7 +134,8 @@ def schedule(jobs, profiles, capacity, output, max_repair_rounds=4, stop_request
              job_timeout=None, prioritize_repair=False, growth_reserve=0, growth_headroom=None,
              deferred=(), release_gate=None):
     """Run commands to exit before returning their tokens and queuing successors."""
-    integer(max_repair_rounds, 1)
+    if max_repair_rounds is not None:
+        integer(max_repair_rounds, 1)
     pending = deque(jobs)
     deferred = tuple(deferred)
     if deferred and release_gate is None:
@@ -189,7 +190,7 @@ def schedule(jobs, profiles, capacity, output, max_repair_rounds=4, stop_request
                             outcomes[job.motion] = "complete"
                             continue
                         next_round = job.round + 1
-                        if next_round > max_repair_rounds:
+                        if max_repair_rounds is not None and next_round > max_repair_rounds:
                             raise ValueError("repair round limit reached")
                         successor = Job.parse(next_spec, profiles, job.motion, "repair", next_round)
                         if prioritize_repair:

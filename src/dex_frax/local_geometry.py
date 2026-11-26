@@ -8,8 +8,17 @@ from .support_quality import preserve_contact, same_support_step
 from .v8.support_acceptance import SUPPORT_ACCEPTANCE_M
 
 
+def platform_contact(robot, group, anchor):
+    body=group['foot']
+    hull=group['hull']
+    vertex=hull[np.argmin(hull@robot.rot(body)[2])]
+    error=np.r_[robot.point(body,group['sole'])[:2]-anchor[:2],
+                robot.point(body,vertex)[2]-anchor[2]]
+    return error,vertex
+
+
 class Geometry:
-    def __init__(self,robot,t,xs,a,b,ids,moves,restore=False,fixed_frames=(),*,initial_leg_repair=False,collision_cfg=None,frame_reconstruction=False,coupled_support=False,preserve_support_step=False,coupled_leg_clearance=False):
+    def __init__(self,robot,t,xs,a,b,ids,moves,restore=False,fixed_frames=(),*,initial_leg_repair=False,collision_cfg=None,frame_reconstruction=False,coupled_support=False,preserve_support_step=False,coupled_leg_clearance=False,restore_violations_only=False):
         self.r,self.t,self.xs,self.a,self.b,self.ids=robot,t,xs,a,b,np.asarray(ids)
         self.restore=restore;self.fixed=set(fixed_frames);self.n=b-a;self.width=len(ids)
         self.initial_leg_repair=initial_leg_repair
@@ -39,6 +48,8 @@ class Geometry:
                 self.palms=SourcePalms(robot,t,xs,a,b,sides,ids,interior_deg=0. if coupled_support else .1,fixed_frames=sorted(self.fixed))
         deltas=Rotation.from_matrix(t['root_r'][a:b-1].transpose(0,2,1)@t['root_r'][a+1:b]).as_rotvec()
         self.samples=[];self.native=[]
+        self.platform_rows={}
+        platform=t.get('_inferred_platform_repair')
         previous_points = {}
         for j in range(self.n):
             for part in range(8 if j+1<self.n else 1):
@@ -47,13 +58,40 @@ class Geometry:
                 robot.set(row,rotation)
                 immutable=j in self.fixed and (not part or j+1 in self.fixed)
                 before_floor=np.array([float((robot.surface_models[body]['hull']@robot.rot(body)[2]+robot.point(body)[2]).min()) for body in self.bodies])
-                floor_target=np.full(len(self.bodies),-.0008) if restore and not immutable else np.minimum(-.00099,before_floor-1e-7)
+                floor_target=np.minimum(-.00099,before_floor-1e-7)
+                if restore and not immutable:
+                    needs_clearance = before_floor < -SUPPORT_ACCEPTANCE_M if restore_violations_only else slice(None)
+                    floor_target[needs_clearance] = -.0009 if restore_violations_only else -.0008
                 target=None;before_distance=None
                 if self.collision is not None:
                     self.collision.update(row,rotation);before_distance=self.collision.distances().copy()
                     target=np.minimum(.0001,before_distance-1e-7)
-                    if restore and not immutable:target[~passive]=.0001
+                    if restore and not immutable:
+                        owned = ~passive
+                        if restore_violations_only:
+                            owned &= before_distance < -self.collision.cfg['penetration_tolerance_m']
+                        target[owned]=.0001
                 self.samples.append((j,u,rotation,row,floor_target,target,before_floor,before_distance))
+                if platform is not None and not immutable:
+                    for side, group in robot.sides.items():
+                        if not moves(group['foot']):continue
+                        foot=t['sides'][side]
+                        i=a+j
+                        owner=foot['platform_index'][i]
+                        if owner<platform or (part and foot['platform_index'][i+1]!=owner):
+                            continue
+                        anchor=foot['platform_anchor'][i]
+                        error,_=platform_contact(robot,group,anchor)
+                        # Use the existing platform-phase interior target and
+                        # taper toward exact, protected boundary samples.
+                        steps=min((abs(j-fixed) for fixed in self.fixed),default=8)
+                        if part:steps=min(steps,min((abs(j+1-fixed) for fixed in self.fixed),default=8))
+                        weight=.85*np.sin(np.pi/2.*min(steps/8.,1.))**2
+                        radius=max(.00097,float(np.linalg.norm(error)))
+                        floor=min(-.00097,float(error[2]))
+                        radius+=weight*(.00070-radius)
+                        floor+=weight*(max(floor,-.00075)-floor)
+                        self.platform_rows.setdefault(len(self.samples)-1,[]).append((group,anchor,radius,floor))
             robot.set(xs[a+j],t['root_r'][a+j]);feet=[];body_contacts=[]
             for side,g in robot.sides.items():
                 if not moves(g['foot']) or t['sides'][side]['contact'][a+j]<=0:continue
@@ -62,9 +100,12 @@ class Geometry:
                 # Leave an interior corridor below the unchanged 1 mm gate.
                 # Pinning a passing contact to its current norm can stall SQP
                 # at a curved boundary during otherwise feasible smoothing.
-                bound=.0008 if restore and j not in self.fixed else max(.00099,float(np.linalg.norm(error)))
+                norm = float(np.linalg.norm(error))
+                bound = max(.00099,norm)
+                if restore and j not in self.fixed and (not restore_violations_only or norm > SUPPORT_ACCEPTANCE_M):
+                    bound = .00092 if restore_violations_only else .0008
                 tolerance=np.full(3,bound)
-                feet.append((side,tolerance,bound,max(.001,float(np.linalg.norm(error)))))
+                feet.append((side,tolerance,bound,max(.001,norm)))
                 if preserve_support_step:
                     if j and same_support_step(v, a+j) and not {j-1,j}.issubset(self.fixed):
                         previous_step = np.linalg.norm(point[:2] - previous_points[side])
@@ -144,6 +185,20 @@ class Geometry:
         for index,(j,u,rotation,base,ft,dt,bf,bd) in enumerate(self.samples):
             x=pose(j,u,base);r.set(x,rotation)
             movable=(0<=j<self.n and j not in self.fixed) or (u and 0<=j+1<self.n and j+1 not in self.fixed)
+            for group,anchor,radius,minimum in self.platform_rows.get(index,()):
+                error,vertex=platform_contact(r,group,anchor)
+                height=error[2]
+                penalty+=max(minimum-height,0.)**2
+                magnitude=np.linalg.norm(error)
+                if not u:penalty+=max(magnitude-radius,0.)**2
+                if linear:
+                    vertical,_=r.jac(group['foot'],vertex)
+                    add(vertical[2,self.ids],minimum-height,np.inf,j,u)
+                    if not u:
+                        xy,_=r.jac(group['foot'],group['sole'])
+                        matrix=np.vstack([xy[:2],vertical[2]])[:,self.ids]
+                        add(matrix,-radius-error,radius-error,j)
+                        if magnitude>1e-10:add((error/magnitude)@matrix,-np.inf,radius-magnitude,j)
             for k,body in enumerate(self.bodies):
                 hull=r.surface_models[body]['hull'];heights=hull@r.rot(body)[2]+r.point(body)[2];v=int(np.argmin(heights));height=float(heights[v]);gap=height-ft[k]
                 floor_min=min(floor_min,height)

@@ -84,12 +84,16 @@ def run_worker(stage, motion, config_path, round_number, modules):
     else:
         if record["status"] != "complete":
             raise ValueError("Repair did not finish its quality check")
-        if (record.get("quality") == "review" and round_number < config["repair_rounds"]
+        round_limit = config["repair_rounds"]
+        if (record.get("quality") in {"review", "accepted_with_notes"}
+                and (round_limit is None or round_number < round_limit)
                 and not (output / "pre_final_retime").exists()):
             report = json.loads((output / "repair.json").read_text())
-            if report["status"] in {"pending_budget", "time_slice_review"} or any(
-                job["module"] not in modules and job["next_recipe"] for job in report["pending"]
-            ):
+            retry_limited = (round_limit is not None and report["status"] in
+                             {"pending_budget", "time_slice_review"})
+            untried_module = any(job["module"] not in modules and job["next_recipe"]
+                                 and not job.get("dependency") for job in report["pending"])
+            if retry_limited or untried_module:
                 successor = dict(profile="diagnose", frames={"motion": record["frames"]},
                                  command=worker_command("diagnose", motion, config_path, round_number + 1))
     rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
@@ -102,7 +106,7 @@ def run_worker(stage, motion, config_path, round_number, modules):
 
 def add_options(parser):
     parser.add_argument("--system-reserve-mib", type=int, default=1024)
-    parser.add_argument("--repair-rounds", type=int, default=2)
+    parser.add_argument("--repair-rounds", type=int, help="Optional repair pass limit for capacity scheduling")
     parser.add_argument("--plan-only", action="store_true")
     parser.add_argument("--recover-from", type=Path, help="Recover the stopped 1.0.3 capacity run")
     parser.add_argument("--recovery-pilot", help="Hold other recovery jobs until the pilot is verified")
@@ -113,11 +117,15 @@ def batch(args, parser):
         parser.error("Capacity scheduling requires --mode refine and a new output directory")
     if args.resource_policy or args.memory_limit_gib is not None:
         parser.error("Capacity scheduling uses fixed resource profiles and the current cgroup limit")
+    if args.repair_rounds is None and (
+        args.recover_from or args.repair_budget not in (None, UNLIMITED_REPAIR_BUDGET)
+    ):
+        args.repair_rounds = 2
     numbers = [args.repair_rounds, args.iterations, args.initial_iterations, args.ik_block_frames,
                args.budget]
     if args.repair_budget not in (None, UNLIMITED_REPAIR_BUDGET):
         numbers.append(args.repair_budget)
-    if any(not math.isfinite(value) or value <= 0 for value in numbers):
+    if any(not math.isfinite(value) or value <= 0 for value in numbers if value is not None):
         parser.error("budgets, round limits, and iteration counts must be positive and finite")
     if args.recovery_pilot and not args.recover_from:
         parser.error("--recovery-pilot requires --recover-from")
@@ -224,11 +232,12 @@ def run(args, parser):
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     attempts = output / "scheduler"
-    deadline = began + args.budget
+    deadline = math.inf if args.budget is None else began + args.budget
+    max_dispatch_rounds = None if args.repair_rounds is None else 2 * args.repair_rounds
     first = [job for job in jobs if job.motion==args.recovery_pilot] if args.recovery_pilot else jobs
     held = [job for job in jobs if job.motion!=args.recovery_pilot] if args.recovery_pilot else ()
     try:
-        outcomes = scheduler.schedule(first, profiles, capacity, attempts, 2 * args.repair_rounds,
+        outcomes = scheduler.schedule(first, profiles, capacity, attempts, max_dispatch_rounds,
                                       stop_requested=lambda: stopping or time.monotonic() >= deadline,
                                       job_timeout=args.frax_timeout,
                                       growth_reserve=256 * resources.MIB,

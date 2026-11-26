@@ -11,7 +11,7 @@ from scipy.spatial.transform import Rotation,Slerp
 
 POLICY='prepared_target_local_root_slowdown_v2'
 DIRECTIONS={'thigh','shin','upper','lower','elbow_axis','hand_forward','hand_width','forearm_width'}
-DISCRETE={'contact','phase','mode','anchors','pivots','source_expected_contact','source_airborne','confidence','ground_contact_confidence','platform_anchor','platform_index','source_scene_support','source_support_uncertain'}
+DISCRETE={'contact','phase','mode','anchors','pivots','source_expected_contact','source_airborne','confidence','ground_contact_confidence','platform_anchor','platform_index','source_scene_support','source_support_uncertain','source_inferred_platform'}
 STATIC={'robot_hull','hull','world_origin','local_axis'}
 
 

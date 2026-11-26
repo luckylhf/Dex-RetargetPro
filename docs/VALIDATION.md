@@ -11,10 +11,10 @@ dex-frax explain outputs/bvh_refine/frax
 | `quality.json` 状态 | 文件和用途 | 接下来的操作 |
 |---|---|---|
 | `accepted` | `refine` 导出 `motion.npz` 和 `training.npz`。 | 用前者回放，用后者接入训练数据流程。 |
-| `accepted_with_notes` | 保留可回放轨迹，终验仍有姿态相似度备注。 | 查看 `pose_notes`，对照源姿态及相关帧。 |
+| `accepted_with_notes` | 保留可回放轨迹和姿态相似度备注，训练文件不导出。 | 查看 `pose_notes`，对照源姿态及相关帧。 |
 | `review` | 预览轨迹，可能残留自碰撞、穿地、支撑或时序问题。 | 使用 `motion.npz` 回放，按 `flags` 对照问题帧。 |
 
-`run.json` 的 `status=complete` 表示转换进程已完成。能否用于训练以验收状态和实际导出的 `training_npz` 为准。普通轨迹和训练文件的字段见 [输出说明](INPUTS.md#输出)。
+`run.json` 的 `status=complete` 表示转换进程已完成。训练入口使用实际导出的 `frax/training.npz`，对应 `run.json` 的 `training_npz` 字段。普通轨迹和训练文件的字段见 [输出说明](INPUTS.md#输出)。
 
 `head_tracking.target_clipped_frames_by_joint` 记录各头部关节源目标截限的帧数，`orientation_error_deg` 记录头部朝向与源目标的差异。触限饱和不影响验收状态。实际输出的角度、超速和碰撞问题按 `flags` 排查。 [头部硬限位规则](SAFETY_REPAIR_RULES.md#头部硬限位)
 
@@ -31,7 +31,10 @@ dex-frax preview outputs/bvh_refine/frax/motion.pkl --output outputs/preview.mp4
 | 精修总时限到期，仍有待办 | `pipeline.md` 的「精修状态」与 `repair.json` 的 `shared_budget_exhausted` | 用同一构建、输入、模型和原选项，从报告中的检查点追加 `--repair-budget` 并写入新目录。 |
 | 单次候选超时 | `repair.json` 的窗口和原因。 | 仍有超时任务时可续跑重试。单次求解上限仍适用。 |
 | 候选拒收或候选已试尽 | `repair.json` 的候选原因及 `quality.json` 的残余问题。 | 根据对应帧检查穿地、碰撞、支撑或时序。是否续跑取决于还有没有可尝试的候选。 |
-| 源数据异常或场景支撑待确认 | `motion.source_review.json`、`quality.json`，以及 `motion.json` 中的接触和场景信息。 | 核对源动作、帧率、单位、骨架和接触。需要改变输入或场景参数时，从原始输入转换到新目录。 |
+| 源数据异常 | `motion.source_review.json` 与 `quality.json`。 | 核对源动作、帧率、单位、骨架和接触。 |
+| `scene_support_unconfirmed` | `motion.json` 的 `source_support_review.unresolved_platforms`。 | 源动作中存在疑似高处承重区间，当前证据还无法确定支撑面。已有实测盒体时，可用 `--scene` 从原始输入转换到新目录。 |
+
+LAFAN 的 A 路线自动把符合重力与稳定足点判据的区间用作平台支撑。`quality.json` 的 `inferred_platform_support` 记录这类支撑的脚锚超差和台面穿入。场景支撑成立后，这两项仍按轨迹实际几何验收。
 
 续跑沿用原转换选项。采用最终限速补帧时，报告会给出 `pre_final_retime` 检查点。 [续跑命令](../README.md#精修预算用完后续跑) · [批次恢复](BATCH.md#续跑与诊断)
 
@@ -40,3 +43,30 @@ dex-frax preview outputs/bvh_refine/frax/motion.pkl --output outputs/preview.mp4
 `motion.npz` 中的 `source_frame_float` 和 `source_time_s` 对应原生数据。机器人输出帧按 50 Hz 计，源帧按输入实际帧率计，两个序列都从 0 起算。检查同一处异常时，使用报告的源帧映射对齐原始动作和机器人轨迹。 [输入、时间映射与输出](INPUTS.md)
 
 这套终验用于离线运动学和几何。接入真实硬件前，需要在实际控制环境验证动作可执行性。 [验收规则](SAFETY_REPAIR_RULES.md)
+
+## 平台相位联解试验
+
+2026-11-26。在同源、同模型、同一 50 Hz 时间轴的 31 轴整片底稿上做隔离对照。每条 8,984 帧，预选 4 个互不重叠的接触核心窗。用重力和稳定高处足点确定平台，每个候选以落盘精度检查实际几何、支撑和时序。合并采用窗后重新独立审查整片。 [相位联解流程图](REFINE_FLOWCHART.html#platform-phase) · [默认流程与接入位置](PIPELINE.md#a-路线的平台相位联解)
+
+| 动作 | 尝试的候选 | 采用窗 | 整片平台脚锚超差（脚帧） | 整片平台穿入（采样点） |
+|---|---:|---:|---:|---:|
+| `obstacles1_subject2` | 15 | 3/4 | 3,034 → 2,995 | 18,628 → 18,372 |
+| `obstacles1_subject5` | 13 | 4/4 | 5,276 → 5,169 | 28,762 → 28,261 |
+
+8 个窗中，3 个的平台残差清零，4 个改善，1 个保留底稿。整片自碰撞及关节超速均为 0，抖动维持 8 帧和 4 帧，平地穿地超限采样分别为 0 → 0 和 50 → 47。两条整片均为 `review`，训练包为 0。
+
+实际采用顺序按窗口变化。两个窗在双腿联解时出现平地脚锚退化，改用固定骨盆及对侧腿、只解平台侧腿的候选后通过。`obstacles1_subject5` 的第 484–512 帧采用该分支，平台穿入采样从 41 降到 4，地面穿地采样数保持 15。另有两个窗采用了锁定过渡地面帧并平滑进入退出的联合候选。`obstacles1_subject2` 的第 3568–3582 帧为双脚平台窗，候选遇到优化未收敛或新增碰撞，因而保留底稿。
+
+### 既有做法对照
+
+- **0.8.4 的 29 轴通过记录。** 两条在原批次终验 `accepted`，追加精修批次沿用相同轨迹。两条分别采用 225 和 126 个候选，主要为脚锚与帧间净空，去抖穿插，手臂最后。对齐同一源时间后，当前平台目标中分别有 2,966 / 3,034 和 4,845 / 5,276 个脚帧在旧版标作源腾空。旧版按当时的地面支撑和全身几何规则验收。
+- **逐帧贴合对照。** 重力法将两条旧记录的待确认段分别从 115、142 降到 0。逐帧贴合将平台脚锚超差降到 0，同时产生 660、514 个自碰撞采样点及 25、69 个超速间隔。两份候选均未采用。
+- **过渡帧保护原型。** 隔离试验对比了原底稿、经核验的逐帧拟合初值，以及锁定过渡地面帧、平滑进入退出并限制修正幅度的候选。
+
+### 默认 A 接入复验
+
+在六条既有 31 轴检查点上用默认 A 精修并独立终验，单条专项预算为 20–120 秒。结果为 2 条 `accepted`、2 条 `accepted_with_notes`、2 条 `review`。一条长舞蹈的自碰撞采样点由 55 降到 0，保留手臂姿态备注。另一条长舞蹈的两种相位候选均因脚锚复检被拒，仍有 220 个自碰撞采样点。
+
+另从 `obstacles1_subject5` 的 8,984 帧检查点运行 150 秒平台专项。3 次相位联解被拒后，同窗单腿候选通过并采用。平台脚锚超差由 5,276 降到 5,244 脚帧，台面穿入由 28,762 降到 27,878 个采样点，整片仍为 `review`。上述结果覆盖检查点精修和整片终验。
+
+可在 `frax/repair.json` 的 `attempts` 中按 `recipe`、`status` 和 `reason` 查候选派发、采用及拒收。 [默认流程](PIPELINE.md#a-路线的平台相位联解)

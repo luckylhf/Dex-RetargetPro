@@ -91,7 +91,7 @@ class WorkQueue:
                     state['rounds']=state.get('rounds',0)+1
             start,end=bounds(state['level'])
             job.update(start=start,end=end,context_level=state['level'])
-            context=hashlib.sha256(np.ascontiguousarray(rows[max(0,job['start']-1):min(n,job['end']+1)]).tobytes()).hexdigest()
+            context=self.context(job,rows)
             if state.get('context')!=context:
                 own=context==state.pop('own_result_context',None)
                 if state.get('context') is not None and not own:state['reactivations']+=1
@@ -100,6 +100,15 @@ class WorkQueue:
                 state['timed_recipes']=[];state['stalled']=[];state['progress']={};state['cursor']=len(state['done'])
             out.append(job)
         return out
+    @staticmethod
+    def context(job,rows):
+        a,b=job['start'],job['end']
+        for key in ('phase_leg_window','platform_window'):
+            if key in job:
+                lo,hi=job[key]
+                a,b=min(a,lo),max(b,hi)
+        span=np.ascontiguousarray(rows[max(0,a-1):min(len(rows),b+1)])
+        return hashlib.sha256(span.tobytes()).hexdigest()
     def actionable(self,jobs):return [j for j in jobs if self.choices(j)]
     def next(self,jobs):
         available=self.actionable(jobs)
@@ -125,8 +134,7 @@ class WorkQueue:
         if kept:
             state['round_improved']=True
             if result_rows is not None:
-                lo=max(0,job['start']-1);hi=min(len(result_rows),job['end']+1)
-                state['own_result_context']=hashlib.sha256(np.ascontiguousarray(result_rows[lo:hi]).tobytes()).hexdigest()
+                state['own_result_context']=self.context(job,result_rows)
         state['cursor']=len(state['done'])
     def pending(self,jobs):
         result=[]

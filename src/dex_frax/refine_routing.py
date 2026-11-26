@@ -137,6 +137,31 @@ def coupled_leg_window(start,end,collision,floor,trusted_support,phase_edges):
     return None
 
 
+def leg_phase_repair(start, end, collision, support_error, flight, foot_support, phase_edges, padding):
+    """Offer a phase fit only for flight or a coupled contact transition."""
+    hits = np.flatnonzero(collision[start:end]) + start
+    if not len(hits):
+        return None
+    flights = hits[flight[hits]]
+    n = len(collision)
+    if len(flights):
+        frame = flights[0]
+        index = np.searchsorted(phase_edges, frame, side='right') - 1
+        left, right = phase_edges[index:index+2]
+        inner = flights[flights < right]
+        lo = max(0, int(max(left, inner[0]-padding))-2)
+        hi = min(n, int(min(right, inner[-1]+padding+1))+2)
+        return ('flight', [lo, hi]) if hi-lo >= 5 else None
+    lo = max(0, int(hits[0])-padding)
+    hi = min(n, int(hits[-1])+padding+1)
+    if not foot_support[lo:hi].any():
+        return None
+    transitions = phase_edges[(phase_edges > lo) & (phase_edges < hi)]
+    if not len(transitions) and not support_error[start:end].any():
+        return None
+    return ('support', [lo, hi]) if hi-lo >= 5 else None
+
+
 def group_jitter_jobs(pending, robot):
     """Use one queue entry for each set of joints sharing a local solver."""
     groups={robot.names[i-3]:'legs' for leg in robot.sides.values() for i in leg['leg']}
@@ -249,6 +274,13 @@ def next_window_job(queue,ready,previous=None,*,attempts=()):
             priority=WINDOW_PRIORITY[stage]
         return (tier,family_visits[stage],queue.state(job)['visits'],
                 priority,-job['severity'],job['core_start'])
+    if previous and previous['status']=='rejected':
+        fallback={'platform_phase':'platform_leg_only','phase_leg_clearance':'phase_leg_rollback',
+                  'phase_leg_rollback':'phase_leg_clearance'}.get(previous.get('recipe'))
+        if fallback:
+            for job in ready:
+                if queue.key(job)==queue.key(previous) and queue.recipe(job)==fallback:
+                    return job
     if previous and previous.get('changed_span') and previous['status']=='kept' and previous['module'] in (*WINDOW_GEOMETRY,'body'):
         lo,hi=previous['changed_span']
         temporal=[job for job in ready if job['module']=='jitter'

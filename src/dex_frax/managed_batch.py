@@ -87,7 +87,8 @@ class Slot(Worker):
 
 def timeout_for(args,mode,frames):
     explicit=getattr(args,mode+'_timeout',None)
-    if explicit is None and getattr(args,'profile',None) in ('fast','refine'):return args.budget
+    if explicit is None and getattr(args,'profile',None) in ('fast','refine'):
+        return float('inf') if args.budget is None else args.budget
     return explicit if explicit is not None else (max(900.,300.+.5*frames) if mode=='frax' else max(1800.,600.+1.5*frames))
 
 def finish(record,response,mode,folder,out,allow_collision_v8=False):
@@ -327,6 +328,7 @@ def _run(args,slot_factory,monitor):
     from .dynamic_resources import CpuAdmission
     cpu_admission=CpuAdmission(os.sched_getaffinity(0) if hasattr(os,'sched_getaffinity') else range(res.cpu_count()),nworkers) if dynamic else None
     started=time.monotonic();last_checkpoint=started;last_heartbeat=started;loop_seconds=0.;usage={};state='running';phase='prepare';active={};slots=[];last=0.;stopped=False;wait_since=None;last_reason=None
+    deadline = float('inf') if args.budget is None else started + args.budget
     records=[dict(case=c['id'],status='pending',attempts=[],selected_mode=None,selected_output=None,training_npz=None) for c in cases]
     snapshot=static_identity();previous=None
     learning=MemoryLearning(res.state_root(),dict(identity=snapshot,execution=dict(
@@ -543,7 +545,7 @@ def _run(args,slot_factory,monitor):
             if cpu_admission:cpu_admission.sample([os.getpid()]+[s.pid for s in slots])
             dispatch_limit=min(admission.value['workers'],nworkers,memory_queue.limit)
             if stopped or stop_path.exists():state='interrupted';abort('interrupted');break
-            if time.monotonic()-started>=args.budget:state='budget_exhausted';abort('budget_exhausted');break
+            if time.monotonic()>=deadline:state='budget_exhausted';abort('budget_exhausted');break
             free=res.shutil.disk_usage(out).free
             if free<disk_floor:state='resource_exhausted';last_reason='disk_reserve';abort('resource_exhausted');break
             for slot,item in list(active.items()):
@@ -808,7 +810,7 @@ def _run(args,slot_factory,monitor):
                         stage_memory.register(idle,active[idle])
                         if initial:stage_memory.protected=None
                 pool_stats['resident_reuses' if idle.pid else 'process_starts']+=1
-                idle.start(job,min(timeout_for(args,mode,frames[i]),max(.01,args.budget-(time.monotonic()-started))))
+                idle.start(job,min(timeout_for(args,mode,frames[i]),max(.01,deadline-time.monotonic())))
                 snap=monitor()
                 for key in burst_headroom:
                     burst_headroom[key]=min(burst_headroom[key],snap[key])
