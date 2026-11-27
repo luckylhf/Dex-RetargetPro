@@ -35,6 +35,7 @@ def arguments(job, output=None):
     return dict(job['options'], input=job['input'], output=output, source=job['source'],
                 mode='frax', profile='refine', refine_flow='A', max_frames=None,
                 unified_repair=True, continue_from=job.get('checkpoint'),
+                resume_same_round=job.get('resume_same_round', False),
                 ground_running=job.get('ground_running', False))
 
 
@@ -277,7 +278,7 @@ def schedule(jobs, root, ramp, workers, initial_memory):
                 continue
             checkpoint, reason = verified_seed(a/'frax',job)
             if checkpoint:
-                job['checkpoint'] = checkpoint
+                job.update(checkpoint=checkpoint, resume_same_round=True)
                 break
             event('checkpoint_rejected', key=job['key'], folder=str(a/'frax'), reason=reason)
         pending.append(job)
@@ -335,7 +336,7 @@ def schedule(jobs, root, ramp, workers, initial_memory):
                                 job = w['job']
                                 checkpoint,_ = verified_seed(w['folder'],job)
                                 if checkpoint:
-                                    job['checkpoint'] = checkpoint
+                                    job.update(checkpoint=checkpoint, resume_same_round=True)
                                 pending.appendleft(job)
                                 next_start = now + max(ramp,10.)
                                 event('oom_retry',key=key,checkpoint=job.get('checkpoint'))
@@ -403,7 +404,7 @@ def schedule(jobs, root, ramp, workers, initial_memory):
                     if key==compiler_owner:
                         compiler_owner=None
                     if checkpoint:
-                        job['checkpoint']=checkpoint
+                        job.update(checkpoint=checkpoint, resume_same_round=True)
                     next_start=now+ramp
                     exclusive=head['job']['key']
                     pending.appendleft(job)
@@ -451,7 +452,7 @@ def schedule(jobs, root, ramp, workers, initial_memory):
 
 
 def main():
-    from .cli import _repair_budget_arg
+    from .cli import add_repair_budget_option
     from .contract import DEFAULT_FOOT_CONTACT
     from .smplx_cli import add_options
 
@@ -467,8 +468,7 @@ def main():
     parser.add_argument('--iterations', type=int, default=8)
     parser.add_argument('--initial-iterations', type=int, default=100)
     parser.add_argument('--allow-local-slowdown', action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument('--repair-budget', type=_repair_budget_arg, metavar='SECONDS|unlimited',
-                        help='Shared repair time per motion; default unlimited')
+    add_repair_budget_option(parser)
     add_options(parser)
     args = parser.parse_args()
     args.manifest = args.manifest.resolve()

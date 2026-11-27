@@ -9,21 +9,14 @@ import os
 from pathlib import Path
 import time
 
-from .contract import (DEFAULT_FOOT_CONTACT, DEFAULT_REFINE_FLOW, REFINE_FLOWS,
+from .contract import (DEFAULT_FOOT_CONTACT, DEFAULT_REFINE_FLOW, DEFAULT_REFINE_SECONDS_PER_FRAME, REFINE_FLOWS,
                        UNLIMITED_REPAIR_BUDGET, uses_original_frax)
 
 
-def _repair_budget_arg(value):
-    if value == UNLIMITED_REPAIR_BUDGET:
-        return value
-    error = argparse.ArgumentTypeError('expected positive finite seconds or unlimited')
-    try:
-        seconds = float(value)
-    except ValueError:
-        raise error from None
-    if not math.isfinite(seconds) or seconds <= 0:
-        raise error
-    return seconds
+def add_repair_budget_option(parser):
+    parser.add_argument('--repair-budget', choices=[UNLIMITED_REPAIR_BUDGET],
+                        help=f'Refine only: default {DEFAULT_REFINE_SECONDS_PER_FRAME} seconds per 50 Hz input frame '
+                             'for the middle refine stage; use unlimited to remove this cap')
 
 
 def sha(path):
@@ -165,7 +158,8 @@ def convert(args):
                     initial_only=initial_only,initial_from=initial_from,initial_marker=initial_marker,scene=getattr(args,'scene',None),scene_hash=ident.get('conversion_contract',{}).get('scene_sha256'),
                     repair_modules=getattr(args,'repair_modules',None),repair_plan_only=getattr(args,'repair_plan_only',False),
                     ground_running=getattr(args,'ground_running',False),
-                    refine_flow=ident['conversion_contract'].get('refine_flow', DEFAULT_REFINE_FLOW))
+                    refine_flow=ident['conversion_contract'].get('refine_flow', DEFAULT_REFINE_FLOW),
+                    resume_same_round=getattr(args,'resume_same_round',False))
         if getattr(args,'repair_plan_only',False):
             record = dict(status="repair_planned", frames=meta["output_frames"], workload=meta["_repair_plan"])
             atomic_json(out / "run.json", record)
@@ -193,12 +187,19 @@ def convert(args):
         if getattr(args,'allow_local_slowdown',False):
             from .retiming import final_candidate
             context = meta.pop('_retiming_ik_context', None)
+            retime_started = time.monotonic()
+            deadline = (float('inf') if getattr(args,'profile',None) == 'refine'
+                        else retime_started+remaining_repair_s)
             meta,result = final_candidate(pkl,meta,result,solve,args.mode,context=context,
-                                          deadline=time.monotonic()+remaining_repair_s)
+                                          deadline=deadline)
+            retime_elapsed = time.monotonic()-retime_started
+            meta['stage_times_s']['final_retiming'] = retime_elapsed
+            atomic_json(pkl.with_suffix('.json'),meta)
             repair_path = out/(meta.get('unified_repair') or {}).get('report_path','repair.json')
             if repair_path.is_file():
                 repair = json.loads(repair_path.read_text())
                 repair['final_retiming'] = (meta.get('retiming') or {}).get('final_adaptation')
+                repair['final_retiming_elapsed_s'] = retime_elapsed
                 if (repair['final_retiming'] or {}).get('decision') == 'pending_budget':
                     repair.update(status='pending_budget', shared_budget_exhausted=True)
                 atomic_json(repair_path,repair)
@@ -326,8 +327,7 @@ def main():
     conv.add_argument('--scene',type=Path,help='Refine only: measured scene boxes in robot export coordinates')
     conv.add_argument('--allow-local-slowdown',action=argparse.BooleanOptionalAction,default=None,
                       help='Refine defaults to local frame insertion for motor-speed violations; disable to preserve timing')
-    conv.add_argument('--repair-budget',type=_repair_budget_arg,metavar='SECONDS|unlimited',
-                      help='Shared repair seconds or unlimited (refine default: unlimited)')
+    add_repair_budget_option(conv)
     conv.add_argument('--refine-flow', choices=REFINE_FLOWS,
                       help=refine_flow_help)
     conv.add_argument('--budget',type=float,help='Total seconds including preparation, IK, repair and final audit (refine default: unlimited)')
@@ -351,8 +351,7 @@ def main():
     batching.add_argument('--initial-iterations',type=int,default=100)
     batching.add_argument('--allow-local-slowdown',action=argparse.BooleanOptionalAction,default=None,
                           help='Refine defaults to local frame insertion for motor-speed violations')
-    batching.add_argument('--repair-budget',type=_repair_budget_arg,metavar='SECONDS|unlimited',
-                          help='Shared repair seconds per motion or unlimited (refine default: unlimited)')
+    add_repair_budget_option(batching)
     batching.add_argument('--refine-flow', choices=REFINE_FLOWS,
                           help=refine_flow_help)
     batching.add_argument('--budget',type=float,help='Total batch seconds; stop owned workers when exhausted (refine default: unlimited)')

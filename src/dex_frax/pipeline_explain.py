@@ -140,9 +140,11 @@ def _repair_progress(repair):
     pending = (status in ('pending_budget', 'time_slice_review')
                or final_timing.get('decision') == 'pending_budget'
                or temporal.get('status') == 'no_remaining_budget'
-               or (exhausted is True and bool(temporal.get('remaining'))))
+               or (repair.get('budget_scope') != 'middle_refine'
+                   and exhausted is True and bool(temporal.get('remaining'))))
     return dict(status=status, refine_flow=repair.get('refine_flow'),
                 budget_s=repair.get('budget_s'), budget_policy=repair.get('budget_policy'),
+                budget_scope=repair.get('budget_scope'), middle_refine_elapsed_s=repair.get('middle_refine_elapsed_s'),
                 shared_budget_exhausted=exhausted, unfinished_due_to_time_limit=pending)
 
 
@@ -294,25 +296,31 @@ def _render_repair_progress(report):
     if progress.get('refine_flow'):
         lines.append(f"本轮使用精修流程 `{_cell(progress['refine_flow'])}`。")
     unlimited = progress.get('budget_policy') == UNLIMITED_REPAIR_BUDGET
+    scope = '专项精修' if progress.get('budget_scope') == 'middle_refine' else '精修'
     if unlimited:
-        lines.append('本轮精修无总时限，候选仍按单次时限执行。')
+        lines.append(f'本轮{scope}无总时限，候选仍按单次时限执行。')
     elif _number(progress['budget_s']):
-        lines.append(f"本轮精修预算 {_cell(progress['budget_s'])} 秒。")
+        lines.append(f"本轮{scope}预算 {_cell(progress['budget_s'])} 秒。")
+    if progress.get('budget_scope') == 'middle_refine' and _number(progress.get('middle_refine_elapsed_s')):
+        lines.append(f"本轮专项精修已用 {progress['middle_refine_elapsed_s']:.1f} 秒，末尾时序单独计时。")
     if report['status'] != 'review' and not progress['unfinished_due_to_time_limit']:
         return [*lines, '']
     if progress['unfinished_due_to_time_limit']:
         exhausted = progress['shared_budget_exhausted']
         if exhausted is True:
-            lines.append('**精修总预算已耗尽，仍有任务待处理。建议追加精修时间并续跑。**')
+            if scope == '专项精修':
+                lines.append('**专项精修预算已用完，剩余问题见终验。**')
+            else:
+                lines.append('**精修总预算已耗尽，仍有任务待处理。建议追加精修时间并续跑。**')
         elif exhausted is False:
             lines.append('**仍有修复任务受单次时限影响。可续跑以重试未完成的候选。**')
         else:
             lines.append('**修复记录显示仍有任务受时间限制。可从已有结果续跑。**')
         if report.get('profile') == 'refine':
             checkpoint = _dict(report.get('retiming')).get('pre_final_checkpoint') or '.'
-            lines.append(f'本结果下的续跑检查点为 `{_cell(checkpoint)}`。使用同一构建及原转换参数，指定 `--continue-from` 和下一轮的 `--repair-budget`，输出到新目录。')
+            lines.append(f'本结果下的续跑检查点为 `{_cell(checkpoint)}`。使用相同输入、模型及转换选项，指定 `--continue-from` 并输出到新目录。可加 `--repair-budget unlimited` 取消下一轮专项时限。')
         elif report.get('profile') == 'fast':
-            lines.append('可用 `--mode refine` 和所需的 `--repair-budget` 转换到新目录。')
+            lines.append('可用 `--mode refine` 转换到新目录，默认采用专项精修额度。')
     else:
         if progress['shared_budget_exhausted'] is False and not unlimited:
             lines.append('本轮结束时仍有精修时间余量。')

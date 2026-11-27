@@ -30,7 +30,7 @@ def support_solver(cfg):
     if mode=='legacy_slsqp':return legacy_support
     raise ValueError('Unknown support_refinement: '+str(mode))
 
-def convert(bvh,output,source='auto',model=DEFAULT_MODEL,fps=None,config=None,max_frames=None,no_contacts=False,initial_solver=None,refine=True,prepared_input=None,unified_repair=False,repair_similarity='soft',profile=None,repair_budget=None,continue_from=None,resume_recheck=False,allow_local_slowdown=False,bvh_units='cm',bvh_translations='absolute',foot_contact=DEFAULT_FOOT_CONTACT,initial_only=False,initial_from=None,initial_marker=None,scene=None,scene_hash=None,repair_modules=None,repair_plan_only=False, ground_running=False, *, refine_flow=DEFAULT_REFINE_FLOW):
+def convert(bvh,output,source='auto',model=DEFAULT_MODEL,fps=None,config=None,max_frames=None,no_contacts=False,initial_solver=None,refine=True,prepared_input=None,unified_repair=False,repair_similarity='soft',profile=None,repair_budget=None,continue_from=None,resume_recheck=False,allow_local_slowdown=False,bvh_units='cm',bvh_translations='absolute',foot_contact=DEFAULT_FOOT_CONTACT,initial_only=False,initial_from=None,initial_marker=None,scene=None,scene_hash=None,repair_modules=None,repair_plan_only=False, ground_running=False, *, refine_flow=DEFAULT_REFINE_FLOW,resume_same_round=False):
     from ..resource_events import phase
     phase('preprocessing',compile_possible=initial_solver is not None and not getattr(initial_solver,'strict',False))
     start=time.monotonic();output=Path(output)
@@ -411,7 +411,7 @@ def convert(bvh,output,source='auto',model=DEFAULT_MODEL,fps=None,config=None,ma
         if profile in ('fast','refine'):
             from ..refine_pipeline import repair_output
             legacy_v8 = v8_refine or legacy_seed or v8_resume
-            meta=repair_output(robot,t,x,meta,payload,output,initial_solver,repair_budget=repair_budget,continue_from=continue_from,resume_recheck=resume_recheck,repair_modules=repair_modules,plan_only=repair_plan_only,v8_candidates=legacy_v8,segment_cascade=not legacy_v8,refine_flow=refine_flow)
+            meta=repair_output(robot,t,x,meta,payload,output,initial_solver,repair_budget=repair_budget,continue_from=continue_from,resume_recheck=resume_recheck,repair_modules=repair_modules,plan_only=repair_plan_only,v8_candidates=legacy_v8,segment_cascade=not legacy_v8,refine_flow=refine_flow,resume_same_round=resume_same_round)
         else:
             from ..unified_repair import repair_output
             meta=repair_output(robot,t,x,meta,payload,output,initial_solver,repair_similarity,collision_reference=collision_reference)

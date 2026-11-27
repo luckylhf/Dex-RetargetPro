@@ -156,6 +156,80 @@ def test_default_flow_runs_jitter_in_the_a_specialist_queue(tmp_path, monkeypatc
     assert report['final_fresh_audit_equal']
 
 
+@pytest.mark.parametrize('budget', [None, UNLIMITED_REPAIR_BUDGET])
+def test_refine_default_clock_starts_after_audit_and_stops_before_temporal(tmp_path, monkeypatch, budget):
+    from dex_frax import acceptance, refine_pipeline, sparse_jitter, temporal_repair
+
+    src=tmp_path/'first'
+    src.mkdir()
+    robot,targets,path,payload,meta=neutral_clip(src)
+    meta.update(profile='refine',input_frames=10,input_fps=30.)
+    path.with_suffix('.json').write_text(json.dumps(meta))
+    clock=[100.]
+    audit_starts=[]
+    deadlines=[]
+    tail=[]
+    evaluate=acceptance.evaluate
+
+    def baseline_and_terminal(*args, **kwargs):
+        audit_starts.append(clock[0])
+        clock[0]+=100.
+        quality=evaluate(*args, **kwargs)
+        quality['flags']=sorted(set(quality['flags']) | {temporal_repair.JITTER})
+        quality['temporal_quality']['joints']['ankle_pitch_l_joint']['violating_frames']=[18,19]
+        quality['temporal_quality']['violating_frames']=[18,19]
+        return quality
+
+    def spend_candidate(robot, targets, rows, reference, weights, model, job, recipe, deadline, *args):
+        deadlines.append(deadline)
+        if budget is None:
+            clock[0]=deadline
+            raise TimeoutError('test_candidate_deadline')
+        clock[0]+=1.
+        raise ValueError('test_candidate_rejection')
+
+    def cleanup(self, **kwargs):
+        tail.append(clock[0])
+        clock[0]+=50.
+
+    monkeypatch.setattr(refine_pipeline,'time',SimpleNamespace(monotonic=lambda:clock[0]))
+    monkeypatch.setattr(acceptance,'evaluate',baseline_and_terminal)
+    monkeypatch.setattr(refine_pipeline,'propose',spend_candidate)
+    monkeypatch.setattr(temporal_repair.Repair,'jitter',cleanup)
+    monkeypatch.setattr(sparse_jitter,'finish',lambda *args, **kwargs:[])
+    repair_output(robot,targets,None,meta,payload,path,None,repair_budget=budget,repair_modules={'jitter'})
+    report=json.loads((src/'repair.json').read_text())
+    state=json.loads((src/'refine_state.json').read_text())
+    assert report['full_input_frames_50hz']==16
+    assert report['budget_scope']=='middle_refine'
+    assert report['temporal_repair']['status']=='completed'
+    assert report['temporal_repair']['elapsed_s']==50.
+    assert audit_starts==[100.,tail[0]+50.]
+    assert state['middle_refine_elapsed_s']==report['middle_refine_elapsed_s']==pytest.approx(tail[0]-200.)
+    assert report['final_fresh_audit_equal']
+    if budget is None:
+        assert report['budget_s']==pytest.approx(11.2)
+        assert deadlines==pytest.approx([211.2])
+        assert report['shared_budget_exhausted']
+
+        resumed=tmp_path/'resumed'
+        resumed.mkdir()
+        robot,targets,path,payload,meta=neutral_clip(resumed)
+        meta.update(profile='refine',input_frames=10,input_fps=30.)
+        path.with_suffix('.json').write_text(json.dumps(meta))
+        deadlines.clear()
+        repair_output(robot,targets,None,meta,payload,path,None,continue_from=src,
+                      resume_same_round=True,repair_modules={'jitter'})
+        result=json.loads((resumed/'repair.json').read_text())
+        assert result['available_budget_s']==pytest.approx(0.)
+        assert not deadlines
+        assert result['temporal_repair']['status']=='completed'
+    else:
+        assert report['budget_s'] is None
+        assert deadlines[0]==220.
+        assert not report['shared_budget_exhausted']
+
+
 @pytest.mark.parametrize('order',['budgeted','phase'])
 def test_a_leaves_temporal_time_after_specialists_hit_deadline(tmp_path,monkeypatch,order):
     from dex_frax import acceptance, refine_pipeline, sparse_jitter, temporal_repair

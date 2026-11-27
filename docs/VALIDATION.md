@@ -28,7 +28,7 @@ dex-frax preview outputs/bvh_refine/frax/motion.pkl --output outputs/preview.mp4
 
 | 情况 | 要看什么 | 操作 |
 |---|---|---|
-| 精修总时限到期，仍有待办 | `pipeline.md` 的「精修状态」与 `repair.json` 的 `shared_budget_exhausted` | 用同一构建、输入、模型和原选项，从报告中的检查点追加 `--repair-budget` 并写入新目录。 |
+| 专项精修时限到期，仍有待办 | `pipeline.md` 的「精修状态」与 `repair.json` 的 `shared_budget_exhausted` | 沿用原输入、模型和选项，从检查点写入新目录。省略预算参数给默认额度，加 `--repair-budget unlimited` 取消时限。 |
 | 单次候选超时 | `repair.json` 的窗口和原因。 | 仍有超时任务时可续跑重试。单次求解上限仍适用。 |
 | 候选拒收或候选已试尽 | `repair.json` 的候选原因及 `quality.json` 的残余问题。 | 根据对应帧检查穿地、碰撞、支撑或时序。是否续跑取决于还有没有可尝试的候选。 |
 | 源数据异常 | `motion.source_review.json` 与 `quality.json`。 | 核对源动作、帧率、单位、骨架和接触。 |

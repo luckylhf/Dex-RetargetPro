@@ -14,7 +14,8 @@ import time
 from pathlib import Path
 import numpy as np
 from .airborne import airborne_mask, protected_height
-from .contract import DEFAULT_REFINE_FLOW, LEGACY_CHECKPOINT_FLOW, REFINE_FLOWS, UNLIMITED_REPAIR_BUDGET
+from .contract import (DEFAULT_REFINE_FLOW, DEFAULT_REFINE_SECONDS_PER_FRAME, LEGACY_CHECKPOINT_FLOW,
+                       REFINE_FLOWS, UNLIMITED_REPAIR_BUDGET)
 from osqp import OSQPException
 from scipy.spatial.transform import Rotation
 from .adaptive_refine import policy,pose_mask,window_targets,_stage
@@ -648,21 +649,28 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
         np.savez_compressed(path.with_suffix('.npz'),**{k:v for k,v in saved.items() if v is not None})
         meta['output_sha256']=sha(path);atomic_json(path.with_suffix('.json'),meta)
     quality=evaluate(path,meta,solve,'frax',cache=cache);before=copy.deepcopy(quality)
-    # Initial and final independent audits sit outside the shared repair clock.
+    # Initial IK and the independent baseline audit have already completed.
+    separate_timing = meta.get('profile') == 'refine'
     total_frames_50hz = normalized_input_frames(meta, len(payload['dof_pos']))
     budget_source = 'explicit'
     if repair_budget is None:
-        if meta.get('profile') == 'fast':
+        if separate_timing:
+            repair_budget = DEFAULT_REFINE_SECONDS_PER_FRAME * total_frames_50hz
+            budget_source = 'default_middle_refine_50hz'
+        elif meta.get('profile') == 'fast':
             repair_budget = .5 * total_frames_50hz
             budget_source = 'default_full_input_50hz'
         else:
             budget_source = 'default_unlimited'
     if repair_budget == UNLIMITED_REPAIR_BUDGET:
         repair_budget = None
-    budget_policy = UNLIMITED_REPAIR_BUDGET if repair_budget is None else 'shared_wall_time'
+    budget_scope = 'middle_refine' if separate_timing else 'shared_repair'
+    budget_policy = (UNLIMITED_REPAIR_BUDGET if repair_budget is None else
+                     'middle_refine_wall_time' if separate_timing else 'shared_wall_time')
     elapsed_before_resume = 0.
     if resume_same_round and resume_state is not None:
-        elapsed_before_resume = float(resume_state['elapsed_s'])
+        elapsed_before_resume = float(resume_state.get('middle_refine_elapsed_s',0.)
+                                      if separate_timing else resume_state['elapsed_s'])
         if not np.isfinite(elapsed_before_resume) or elapsed_before_resume < 0:
             raise ValueError('Invalid saved repair time')
     available_seconds = None if repair_budget is None else max(0., repair_budget - elapsed_before_resume)
@@ -671,7 +679,19 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
     prior_attempts = list((resume_state or {}).get('segment_attempts', [])) if not resume_recheck else []
     specialist_path = path.parent/'specialist_report.json'
     repair_started = time.monotonic()
+    middle_finished_at = None
     deadline = float('inf') if available_seconds is None else repair_started + available_seconds
+
+    def middle_elapsed():
+        end = time.monotonic() if middle_finished_at is None else middle_finished_at
+        return end-repair_started
+
+    def budget_details():
+        return dict(budget_s=repair_budget, available_budget_s=available_seconds, budget_policy=budget_policy,
+                    budget_scope=budget_scope, budget_source=budget_source, full_input_frames_50hz=total_frames_50hz,
+                    middle_refine_elapsed_s=elapsed_before_resume+middle_elapsed(),
+                    candidate_limits_s=limits)
+
     limits = repair_limits()
     configured_order = limits.pop('a_order','serial')
     a_order = configured_order if legacy_order else 'serial'
@@ -683,7 +703,8 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
     ground_deadline = deadline
     if a_order!='serial' and available_seconds is not None:
         # Isolated geometry work must give the final jitter pass a time slice.
-        if 'conversion_added_jitter' in quality['flags'] and (repair_modules is None or 'jitter' in repair_modules):
+        if (not separate_timing and 'conversion_added_jitter' in quality['flags']
+                and (repair_modules is None or 'jitter' in repair_modules)):
             specialist_deadline -= .25 * available_seconds
         ground_deadline = min(specialist_deadline,repair_started+min(50.,available_seconds/15.))
     specialist_elapsed = 0.
@@ -982,11 +1003,13 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
         return len(attempts) + len(prior_attempts)
 
     def checkpoint(status, include_pending=True):
+        elapsed = elapsed_before_resume+(middle_elapsed() if separate_timing else time.monotonic()-repair_started)
+        timing = dict(middle_refine_elapsed_s=elapsed) if separate_timing else {}
         write_checkpoint(path.parent,dict(schema=3,policy=repair_policy,refine_flow=refine_flow,status=status,baseline_sha256=baseline_sha,
             output_sha256=sha(path),states=queue.states,attempts=attempts,kept_candidates=kept,pending=pending_report() if include_pending else [],
             fixed_reference='avoidance_reference.npy',avoidance_reference_sha256=sha(reference_path),unfixed_waist=unfixed_waist.tolist(),prepared_targets_sha256=meta['prepared_targets_sha256'],
             active_phase=active_phase,segment_attempts=prior_attempts,
-            elapsed_s=elapsed_before_resume+time.monotonic()-repair_started))
+            elapsed_s=elapsed, **timing))
     if plan_only:
         pending = pending_report(include_all=True)
         workload = repair_workload(pending, quality['flags'], len(out))
@@ -1011,7 +1034,7 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
         from . import swept_height
 
         started_at = time.monotonic()
-        cutoff = deadline
+        cutoff = float('inf') if separate_timing else deadline
         requested = set(quality['flags']) & FLAGS
         if repair_modules is not None:
             requested = {flag for flag in requested if ('jitter' if flag==JITTER else 'root_angular') in repair_modules}
@@ -1115,7 +1138,7 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
         return result,root_report
 
     def run_segments(specialist_step, specialist_report):
-        nonlocal active_phase,payload,out,quality,cache,current,specialist_elapsed
+        nonlocal active_phase,payload,out,quality,cache,current,specialist_elapsed,middle_finished_at
         from .segment_refine import refine
         atomic_json(specialist_path, specialist_report())
         active_phase = 'segments'
@@ -1159,8 +1182,11 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
             specialist_elapsed+=time.monotonic()-pose_started
         specialist_snapshot = specialist_report()
         atomic_json(specialist_path, specialist_snapshot)
+        middle_finished_at = time.monotonic()
+        if separate_timing:
+            checkpoint('running', include_pending=False)
         temporal_result,root_report = run_temporal()
-        remaining_repair_s = max(0., deadline - time.monotonic())
+        remaining_repair_s = max(0., deadline - (middle_finished_at if separate_timing else time.monotonic()))
         shared_budget_exhausted = remaining_repair_s == 0.
         final_meta['output_sha256'] = sha(path)
         final = evaluate(path,final_meta,solve,'frax',cache={})
@@ -1179,20 +1205,19 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
             status = 'pending_budget'
         full_timeline = [*(dict(item,solver='plugin') for item in attempts), *prior_attempts]
         full_timeline.sort(key=lambda item: item.get('dispatch_index', -1))
-        report = dict(specialist_snapshot, status=status, before=before, after=final,
+        report = dict(specialist_snapshot, **budget_details())
+        report.update(status=status, before=before, after=final,
             refine_flow=refine_flow,temporal_repair=temporal_result, discontinuities=root_report, attempts=full_timeline,
             all_attempts_ordered=all('dispatch_index' in item for item in full_timeline),
             kept_candidates=total_kept, specialist_report='specialist_report.json',
             segment_report='cascade_segments.json', pending_segments=segments.get('pending_segments',[]),
-            budget_s=repair_budget, available_budget_s=available_seconds, budget_policy=budget_policy,
             shared_budget_exhausted=shared_budget_exhausted,
-            budget_source=budget_source, full_input_frames_50hz=total_frames_50hz,
-            candidate_limits_s=limits,
             elapsed_s=time.monotonic()-started, final_sha256=sha(path),
             final_fresh_audit_equal=True)
         atomic_json(path.parent/'repair.json',report)
         final_meta['unified_repair']=dict(report_path='repair.json',status=status,kept_candidates=total_kept)
         final_meta['stage_times_s']['unified_repair']=report['elapsed_s']
+        final_meta['stage_times_s']['middle_refine']=middle_elapsed()
         final_meta['stage_times_s']['temporal_cleanup']=temporal_result.get('elapsed_s',0.)
         final_meta['solver_velocity_check']=final['step_velocity']
         final_meta['self_collision']['export_check']=final['self_collision']
@@ -1350,6 +1375,8 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
             if job is None or time.monotonic()>=specialist_deadline:
                 return False
             growth_checkpoint()
+            if time.monotonic()>=specialist_deadline:
+                return False
             recipe=queue.recipe(job);entry=dict(job,recipe=recipe,status='rejected',dispatch_index=next_dispatch());begin=time.monotonic()
             before_progress=copy.deepcopy(queue.progress(job)) if phase_order else None
             family=clearance_trial_family(job['module'],recipe) if phase_order else None
@@ -1520,14 +1547,17 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
                             elapsed_scope='current_invocation', metrics_scope='shared_geometry',
                             attempt_elapsed_s=sum(item.get('elapsed_s', 0.) for item in attempts),
                             ground_settle_report=ground_file.name if ground_file.is_file() else None,
-                            budget_scope='shared wall time for specialist, segment and temporal work')
+                            budget_scope=budget_scope)
 
             return run_segments(specialist_step, specialist_report)
 
         while (quality['flags'] or v8_candidates or segment_cascade) and run_specialist_trial():
             pass
+    middle_finished_at = time.monotonic()
+    if separate_timing:
+        checkpoint('running', include_pending=False)
     temporal_result,discontinuity_report = run_temporal(jitter_only=legacy_order)
-    remaining_repair_s = max(0., deadline - time.monotonic())
+    remaining_repair_s = max(0., deadline - (middle_finished_at if separate_timing else time.monotonic()))
     shared_budget_exhausted = remaining_repair_s == 0.
     # Independently certify the persisted result for specialist-only or legacy V8 execution.
     description=copy.deepcopy(meta);description['output_sha256']=sha(path)
@@ -1547,14 +1577,13 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
         pending=pending_report(include_all=True),collision_groups={k:len(v) for k,v in groups.items()},baseline_sha256=baseline_sha,final_sha256=sha(path),
         elapsed_s=time.monotonic()-started,target_calibration='full_sequence_once_then_slice',full_v8_restarted=False,
         temporal_repair=temporal_result,discontinuities=discontinuity_report,final_fresh_audit_equal=True,
-        similarity_mode='soft',budget_s=repair_budget,available_budget_s=available_seconds,
-        budget_policy=budget_policy,budget_source=budget_source,
-        shared_budget_exhausted=shared_budget_exhausted,
-        full_input_frames_50hz=total_frames_50hz,candidate_limits_s=limits,
-        a_order=a_order,temporal_reserve_s=None if available_seconds is None else deadline-specialist_deadline)
+        similarity_mode='soft',shared_budget_exhausted=shared_budget_exhausted,
+        a_order=a_order,temporal_reserve_s=None if available_seconds is None else deadline-specialist_deadline,
+        **budget_details())
     atomic_json(path.parent/'repair.json',report)
     description['unified_repair']=dict(report_path='repair.json',kept_candidates=kept,similarity_mode='soft',status=status)
     description['stage_times_s']['unified_repair']=report['elapsed_s'];description['elapsed_s']+=report['elapsed_s']
+    description['stage_times_s']['middle_refine']=middle_elapsed()
     description['stage_times_s']['temporal_cleanup']=temporal_result.get('elapsed_s',0.)
     description['self_collision']['export_check']=quality['self_collision'];description['solver_velocity_check']=quality['step_velocity']
     atomic_json(path.with_suffix('.json'),description);description['_unified_quality']=quality

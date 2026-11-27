@@ -1,12 +1,23 @@
 import hashlib
+import argparse
 import json
 from pathlib import Path
 
 import pytest
 
 from dex_frax import refine_resume
+from dex_frax.cli import add_repair_budget_option
 from dex_frax.memory_pool import BASE, DANGER, GIB, MIB, Lease, Pool, requested_total
 from dex_frax.refine_checkpoint import write
+
+
+def test_refine_budget_option_has_default_and_unlimited_modes():
+    parser=argparse.ArgumentParser()
+    add_repair_budget_option(parser)
+    assert parser.parse_args([]).repair_budget is None
+    assert parser.parse_args(['--repair-budget','unlimited']).repair_budget=='unlimited'
+    with pytest.raises(SystemExit):
+        parser.parse_args(['--repair-budget','1800'])
 
 
 def test_shared_grants_do_not_double_count_resident_memory():

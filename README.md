@@ -22,7 +22,7 @@ export DEX_FRAX_ASSETS="$PWD/assets/dex_evt"
 ```sh
 dex-frax convert /path/to/input.bvh outputs/bvh_preview \
   --source mocap --mode fast --bvh-units cm --bvh-translations absolute \
-  --max-frames 60 --repair-budget 20
+  --max-frames 60
 
 dex-frax convert /path/to/input.bvh outputs/bvh_refine \
   --source mocap --mode refine --bvh-units cm --bvh-translations absolute
@@ -57,18 +57,18 @@ dex-frax convert /path/to/input.pt outputs/smplx_refine \
 
 默认精修路线为 A。FRAX 初解按源动作的支撑类型分流，分别保留接触式与可信非脚支撑的 Fix 配置。精修按接触相位与残差派发常规专项、窗口联解或回溯，并按需为末尾去抖预留时间。 [转换流程](docs/PIPELINE.md)
 
-- `refine` 默认无精修总时限和外层总时限。候选派发在问题处理完毕或可执行候选用尽时结束，随后按需完成时序收尾、限速补帧和独立终验。
-- `--repair-budget 1800` 给单条动作 1,800 秒共享精修预算。省略该参数或显式指定 `--repair-budget unlimited` 时，仍会按单次求解时限轮转候选。
+- `refine` 默认给中间专项精修 `0.7 秒 × 50 Hz 输入帧数`。FRAX 初解、末尾时序、限速补帧和独立终验分别计时。批次外层默认无总时限。
+- 加 `--repair-budget unlimited` 取消中间专项精修的总时限。两种模式都保留单次候选时限。到达上限、已通过或可执行候选用尽时，按已复检的轨迹收尾并完成终验。
 - 需要限制整次转换或整个批次时，可用 `--budget` 指定总秒数，覆盖初解、精修和终验。 [批处理与预算](docs/BATCH.md)
 
 ### 精修预算用完后续跑
 
-显式设置了精修时限且报告显示还有待办时，在同一构建下沿用源文件、模型和转换选项。用 `--continue-from` 指向报告中的检查点。可用 `--repair-budget` 指定本轮时限，省略则继续搜索到可执行候选用尽。
+报告显示耗尽专项精修预算且仍有待办时，沿用源文件、模型和转换选项。用 `--continue-from` 指向报告中的检查点，输出到新目录。省略预算参数给新一轮默认额度，加 `--repair-budget unlimited` 可继续搜索到可执行候选用尽。
 
 ```sh
 dex-frax convert /path/to/input.bvh outputs/bvh_round2 \
   --source mocap --mode refine --bvh-units cm --bvh-translations absolute \
-  --continue-from outputs/bvh_refine/frax --repair-budget 900
+  --continue-from outputs/bvh_refine/frax --repair-budget unlimited
 ```
 
 如果报告将检查点标为 `pre_final_retime`，使用 `outputs/bvh_refine/frax/pre_final_retime`。 [读报告与处理残余问题](docs/VALIDATION.md)

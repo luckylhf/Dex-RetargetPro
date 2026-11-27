@@ -62,6 +62,7 @@ def run_worker(stage, motion, config_path, round_number, modules):
                               initial_from=Path(recovered or initial) if round_number == 1 else None,
                               checkpoint_implementation=config["original_implementation"] if recovered else None,
                               continue_from=previous if round_number > 1 else None,
+                              resume_same_round=round_number > 1,
                               repair_plan_only=stage == "diagnose",
                               repair_modules=frozenset(modules) if stage == "repair" else None)
     record = cli.convert(args)
@@ -93,7 +94,7 @@ def run_worker(stage, motion, config_path, round_number, modules):
                              {"pending_budget", "time_slice_review"})
             untried_module = any(job["module"] not in modules and job["next_recipe"]
                                  and not job.get("dependency") for job in report["pending"])
-            if retry_limited or untried_module:
+            if not report.get("shared_budget_exhausted") and (retry_limited or untried_module):
                 successor = dict(profile="diagnose", frames={"motion": record["frames"]},
                                  command=worker_command("diagnose", motion, config_path, round_number + 1))
     rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
