@@ -184,14 +184,19 @@ def convert(args):
         result = meta.pop('_unified_quality',None)
         if result is None:result = evaluate(pkl, meta, solve, args.mode)
         remaining_repair_s = meta.pop('_remaining_repair_s', 0.)
+        contact_timing_proposals = meta.pop('_contact_timing_proposals',[])
         if getattr(args,'allow_local_slowdown',False):
             from .retiming import final_candidate
+            from .contact_timing import finish as finish_contact_timing
             context = meta.pop('_retiming_ik_context', None)
             retime_started = time.monotonic()
             deadline = (float('inf') if getattr(args,'profile',None) == 'refine'
                         else retime_started+remaining_repair_s)
-            meta,result = final_candidate(pkl,meta,result,solve,args.mode,context=context,
-                                          deadline=deadline)
+            meta,result,contact_retimed = finish_contact_timing(
+                pkl,meta,result,solve,args.mode,context,contact_timing_proposals,deadline)
+            if not contact_retimed:
+                meta,result = final_candidate(pkl,meta,result,solve,args.mode,context=context,
+                                              deadline=deadline)
             retime_elapsed = time.monotonic()-retime_started
             meta['stage_times_s']['final_retiming'] = retime_elapsed
             atomic_json(pkl.with_suffix('.json'),meta)

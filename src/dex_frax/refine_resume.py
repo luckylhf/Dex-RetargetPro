@@ -22,7 +22,8 @@ _RECHECK_COMPATIBLE = {
 # candidate metadata and integer-frame retiming. All artifact checks still run.
 _POOL_PREVIOUS = {
     'cascade.py': ('9c733f866fd3dc0ec4f3d7fc5af88f309726e1eda72ca6cc343cab32aa088ae1',),
-    'cli.py': ('f61ab70fdd95493c72c08a871bf7562a83a366e7060f1bf051482045d5270551',),
+    'cli.py': ('f61ab70fdd95493c72c08a871bf7562a83a366e7060f1bf051482045d5270551',
+               'f1d8e909923cbdd3ba258093d3c1614184460c5273e7d31e20518bfe72151d9b'),
     'contract.py': ('09a4163c61b9ee232430a5f6516157f0838b7d6b90f972b19972a69a389871eb',),
     'managed_batch.py': ('2d8939296717d1379ed129899599371d8dddb7bf741fa3a05240e2e81deaf7eb',),
     'resources.py': ('3762a57e75f4835978173577d1d94e37138e47161c481ac4400a4f6fdc4b9d97',),
@@ -30,22 +31,32 @@ _POOL_PREVIOUS = {
     'memory_pool_batch.py': (None, '878aee12f1f8a25cfe1871424e2530c1f323cf9a138f2477bf0f8d78ef487d2f'),
     'pipeline_explain.py': ('13a2e626a09a58a06021b45d34641e9b721805785e9d8768f9df5ceeb86d4f97',),
     'retarget_batch.py': ('369feb1af8b201bed6a2f4488a3060d38d189a1dc2f6bb461efba28bdbbd1307',),
-    'v8/convert.py': ('2ebeb99eeb5c358956f2df36f0b0c40f4b9f8ab0c01df92a904b7f2e737223b1',),
+    'v8/convert.py': ('2ebeb99eeb5c358956f2df36f0b0c40f4b9f8ab0c01df92a904b7f2e737223b1',
+                      '3074eabe4decb905c71bb55549376cce96cb99df1cf7d565131ed2d4f8b78207'),
     'refine_resume.py': (
+        'fe0d4056b2ab5d80362ac8f90e2d98c3780c3b44fb5c06c20c08138b3907f244',
+        'fba61aa2e54f51cab52afecd08e0568df8cef5a8f9a34aebe88ebcdb3c622f4f',
         '9df7b27e6e8e26dce9a1f315568c4ce1ea337e8182e74830bafbc83fa4fdf452',
         'cd1072a611d348b6d4d082a3cfbbdc6f5ad310e4a3ea547f934fb7b9a8ccd455',
         '634f75d49fbaa93ed99fcad4338553896c086ee22815e3f7fcb49c5b83127c6f',
         '0e7914dc2db9e958a89488260960575954574636057b1f417a243781df046bef',
     ),
     'refine_pipeline.py': (
+        '4c18c7778d1191dc58920a7381194ead411f03493d3ad69f5e04b1076f7213f2',
+        '5509c66056f039dfc03e0c441a2aa170f5addcde0938b697a7907c68168e3c6d',
         '6ad937c38d2467e162745535e3dbd016438f74f096ad1196c7b1d1096e3d70f0',
         '57f3c3c85e0a7dc5c013fe26046f5e882f5a964ce58942e5b3bbe471b863c44e',
         '0c9683e77a98f21877a1677e45c08e9414a8098bee99731fee865ddb9874b5b4',
     ),
+    'refine_dispatch_budget.py': (None,'3eea4363bd04eb2a7e9f39d81742d81db63a6fa959abf47bda9886678a4bb884'),
+    'refine_queue.py': ('d21864417bcaefd791586f649886aa9e92c6841dccf7f7da24a90a370e8d43b2',),
+    'refine_budget.json': ('61b5f89498c7f034893d1acca5a8e91c7bdcd9ad8c27ca469635b8aea11ae1ac',),
+    'cross_foot_repair.py': (None,),
+    'contact_timing.py': (None,),
     'retiming.py': ('bb4b08b97612ec8734ceee8f5d535e6a752867022a2025802dbeb10ea6806332',),
 }
 _POOL_FIXED = {
-    'refine_pipeline.py': '5509c66056f039dfc03e0c441a2aa170f5addcde0938b697a7907c68168e3c6d',
+    'refine_pipeline.py': '55c8998a08ccf19494f36632799fd9a360338616d8d2a23be42d12c611c68693',
     'retiming.py': 'b83626cf6db78716a47754377e5eedb76e3bcb5ee085dbc9b41c368171452de0',
 }
 

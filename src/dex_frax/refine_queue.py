@@ -103,7 +103,7 @@ class WorkQueue:
     @staticmethod
     def context(job,rows):
         a,b=job['start'],job['end']
-        for key in ('phase_leg_window','platform_window'):
+        for key in ('phase_leg_window','platform_window','cross_foot_window'):
             if key in job:
                 lo,hi=job[key]
                 a,b=min(a,lo),max(b,hi)

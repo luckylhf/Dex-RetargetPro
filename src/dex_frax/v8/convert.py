@@ -161,7 +161,8 @@ def convert(bvh,output,source='auto',model=DEFAULT_MODEL,fps=None,config=None,ma
         metadata = repair_output(robot, t, None, meta, payload, output, initial_solver, repair_budget=repair_budget,
                                  continue_from=continuation, repair_modules=repair_modules,
                                  plan_only=repair_plan_only, segment_cascade=True,
-                                 resume_same_round=continuation is not None, refine_flow=refine_flow)
+                                 resume_same_round=continuation is not None, refine_flow=refine_flow,
+                                 allow_contact_retime=allow_local_slowdown)
         return finish_refine(metadata)
     stage_times={};stage_start=time.monotonic()
     if hasattr(initial_solver,'source_time_s'):
@@ -411,7 +412,7 @@ def convert(bvh,output,source='auto',model=DEFAULT_MODEL,fps=None,config=None,ma
         if profile in ('fast','refine'):
             from ..refine_pipeline import repair_output
             legacy_v8 = v8_refine or legacy_seed or v8_resume
-            meta=repair_output(robot,t,x,meta,payload,output,initial_solver,repair_budget=repair_budget,continue_from=continue_from,resume_recheck=resume_recheck,repair_modules=repair_modules,plan_only=repair_plan_only,v8_candidates=legacy_v8,segment_cascade=not legacy_v8,refine_flow=refine_flow,resume_same_round=resume_same_round)
+            meta=repair_output(robot,t,x,meta,payload,output,initial_solver,repair_budget=repair_budget,continue_from=continue_from,resume_recheck=resume_recheck,repair_modules=repair_modules,plan_only=repair_plan_only,v8_candidates=legacy_v8,segment_cascade=not legacy_v8,refine_flow=refine_flow,resume_same_round=resume_same_round,allow_contact_retime=allow_local_slowdown)
         else:
             from ..unified_repair import repair_output
             meta=repair_output(robot,t,x,meta,payload,output,initial_solver,repair_similarity,collision_reference=collision_reference)

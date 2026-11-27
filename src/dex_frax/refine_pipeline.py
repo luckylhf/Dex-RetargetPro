@@ -20,7 +20,9 @@ from osqp import OSQPException
 from scipy.spatial.transform import Rotation
 from .adaptive_refine import policy,pose_mask,window_targets,_stage
 from .audit_cache import fork
+from .cross_foot_repair import RECIPE as CROSS_FOOT
 from .local_refine import fit_window,torso_errors,upper_ids
+from .refine_dispatch_budget import FiniteDispatch
 from .refine_queue import WorkQueue,jobs_from_masks,time_sliced
 from .refine_routing import (LEGACY_SAFETY_ORDER, SAFETY_ORDER, WINDOW_POSE, alignment_reference,
                              checked_geometry_frames, clearance_trial_family, collision_groups, collision_masks,
@@ -363,6 +365,9 @@ def propose(robot,t,out,original,weights,model,job,recipe,deadline,progress=None
         return phase_leg_fit(robot,t,out,weights,model,job,recipe,deadline,progress)
     if recipe in PLATFORM_PHASE:
         return platform_phase_fit(robot,t,out,weights,model,job,recipe,deadline,progress)
+    if recipe == CROSS_FOOT:
+        from .cross_foot_repair import ContactWindow
+        return ContactWindow(robot,t,out,model,job,deadline).run(weights)
     if recipe in (PELVIS_CONTACT,PELVIS_CONTACT_RESTORE,FOOT_GEOMETRY):
         from .pelvis_contact import propose as settle
         rows,rotations,detail=settle(robot,t,out,job,deadline,
@@ -607,9 +612,10 @@ def enrich_jobs(pending, t, robot, cache, model, *, default_a=False):
     return attach(pending,samples,model)
 
 
-def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,continue_from=None,resume_recheck=False,repair_modules=None,plan_only=False,v8_candidates=False,segment_cascade=False,resume_same_round=False,*,refine_flow=DEFAULT_REFINE_FLOW):
+def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,continue_from=None,resume_recheck=False,repair_modules=None,plan_only=False,v8_candidates=False,segment_cascade=False,resume_same_round=False,*,refine_flow=DEFAULT_REFINE_FLOW,allow_contact_retime=False):
     from .acceptance import evaluate
     from .cli import atomic_json,sha
+    from . import contact_timing
     from .refine_checkpoint import artifact, write as write_checkpoint
     from .resource_events import phase
     if refine_flow not in REFINE_FLOWS:
@@ -699,6 +705,8 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
         raise ValueError(f'Unknown A specialist order: {a_order}')
     phase_order = window_order or a_order=='phase'
     phase_combinations = a_order=='phase'
+    if not phase_combinations:
+        limits.pop('cross_foot_reconstruction_seconds',None)
     specialist_deadline = deadline
     ground_deadline = deadline
     if a_order!='serial' and available_seconds is not None:
@@ -770,6 +778,13 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
     queue=WorkQueue(None if resume_state is None else resume_state['states'],
                     retry_timed=resume_state is not None,distinct_contexts=phase_order)
     attempts = [] if resume_state is None or resume_recheck else resume_state['attempts']
+    contact_proposals = []
+    if resume_state is not None and allow_contact_retime and not resume_recheck and not plan_only:
+        contact_proposals = contact_timing.restore_proposals(
+            previous,path.parent,resume_state.get('contact_timing_proposals',()))
+    finite_dispatch = (FiniteDispatch(queue, attempts, resume_same_round)
+                       if legacy_order and separate_timing and phase_order and available_seconds is not None
+                       else None)
     kept = 0 if resume_state is None or resume_recheck else resume_state['kept_candidates']
     model=CollisionModel(robot,dict(meta['configuration'].get('self_collision') or {},coverage='full'))
     infeasible_clearance={(a['start'],a['end'],a['clearance_context'],a['clearance_family'])
@@ -935,7 +950,19 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
                 if module in {'arms','torso','support','leg_collision','leg_pose','body','dense_floor','collision'}:
                     recipes = job.get('candidate_order', RECIPES[module])
                     job['candidate_order'] = [recipes[0], 'frax_candidate', *recipes[1:]]
-        return queue.configure(pending,np.c_[out,payload['root_rot']])
+        rows = np.c_[out,payload['root_rot']]
+        configured = queue.configure(pending,rows)
+        if phase_combinations and (repair_modules is None or 'leg_collision' in repair_modules or include_all):
+            from .cross_foot_repair import jobs as cross_foot_jobs
+            fallback = []
+            for job in cross_foot_jobs(model,t,cache['full_collision']['samples']):
+                overlaps = any(other['module']=='leg_collision' and queue.choices(other)
+                               and other['core_start']<job['core_end'] and other['core_end']>job['core_start']
+                               for other in configured)
+                if not overlaps or stalled_window(job,attempts):
+                    fallback.append(job)
+            configured += queue.configure(fallback,rows)
+        return configured
     def eligible(pending):
         cm=collision_masks(cache['full_collision']['samples'],groups,len(out))
         if phase_order:
@@ -1008,7 +1035,7 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
         write_checkpoint(path.parent,dict(schema=3,policy=repair_policy,refine_flow=refine_flow,status=status,baseline_sha256=baseline_sha,
             output_sha256=sha(path),states=queue.states,attempts=attempts,kept_candidates=kept,pending=pending_report() if include_pending else [],
             fixed_reference='avoidance_reference.npy',avoidance_reference_sha256=sha(reference_path),unfixed_waist=unfixed_waist.tolist(),prepared_targets_sha256=meta['prepared_targets_sha256'],
-            active_phase=active_phase,segment_attempts=prior_attempts,
+            active_phase=active_phase,segment_attempts=prior_attempts,contact_timing_proposals=contact_proposals,
             elapsed_s=elapsed, **timing))
     if plan_only:
         pending = pending_report(include_all=True)
@@ -1346,15 +1373,30 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
                 attempts.append(dict(job))
                 checkpoint('running')
             atomic_json(path.parent/'ground_settle.json',ground_report)
+        def candidate_seconds(job, recipe):
+            if recipe == CROSS_FOOT:
+                return limits.get('cross_foot_reconstruction_seconds',90)
+            seconds = limits['specialist_candidate_seconds']
+            if recipe in PLATFORM_PHASE or (recipe in PHASE_LEGS and job['leg_phase']=='support'):
+                seconds *= 2
+            return seconds
+
         def run_specialist_trial(*,pose_only=None):
             nonlocal out,payload,quality,cache,current,kept,unfixed_waist
             if time.monotonic() >= specialist_deadline:
                 return False
             pending=jobs();ready,blocked=eligible(pending)
+            dispatch = None
             if phase_order:
                 if pose_only is not None:
                     ready=[j for j in ready if (j['module'] in WINDOW_POSE)==pose_only]
-                job=next_window_job(queue,ready,attempts[-1] if attempts else None,attempts=attempts)
+                if finite_dispatch is not None:
+                    job, dispatch = finite_dispatch.choose(
+                        pending, ready, quality['flags'], specialist_deadline-time.monotonic(),
+                        candidate_seconds, (*PHASE_LEGS, *PLATFORM_PHASE, COUPLED_LEGS, CROSS_FOOT, 'coupled_body_support'),
+                        nominal_frames=POLICY['core_frames'])
+                else:
+                    job=next_window_job(queue,ready,attempts[-1] if attempts else None,attempts=attempts)
             elif v8_candidates:
                 available = queue.actionable(ready)
                 def priority(job):
@@ -1378,17 +1420,23 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
             if time.monotonic()>=specialist_deadline:
                 return False
             recipe=queue.recipe(job);entry=dict(job,recipe=recipe,status='rejected',dispatch_index=next_dispatch());begin=time.monotonic()
+            verification_seconds = 0.
+            if dispatch is not None:
+                if dispatch['estimated_seconds'] > specialist_deadline - begin:
+                    finite_dispatch.budget_blocked = True
+                    return False
+                verification_seconds = dispatch['verification_seconds']
+                entry['budget_dispatch'] = dispatch
+                old_flags = set(quality['flags'])
             before_progress=copy.deepcopy(queue.progress(job)) if phase_order else None
             family=clearance_trial_family(job['module'],recipe) if phase_order else None
             if family is not None:
                 entry.update(clearance_family=family,clearance_context=queue.state(job)['context'])
             try:
-                slice_s = limits['specialist_candidate_seconds']
-                if recipe in PLATFORM_PHASE or (recipe in PHASE_LEGS and job['leg_phase']=='support'):
-                    slice_s *= 2
-                local_deadline = min(specialist_deadline, begin + slice_s)
+                slice_s = candidate_seconds(job, recipe)
+                local_deadline = min(specialist_deadline - verification_seconds, begin + slice_s)
                 entry['window_allowance_s'] = max(0., local_deadline - begin)
-                local_model=model if recipe.startswith('hand_leg') else models.get(job['module'],models.get('collision',model)) if job['module'] in ('collision','leg_collision','torso') else model
+                local_model=model if recipe==CROSS_FOOT or recipe.startswith('hand_leg') else models.get(job['module'],models.get('collision',model)) if job['module'] in ('collision','leg_collision','torso') else model
                 try:
                     if recipe == 'frax_candidate':
                         candidate,detail=frax_candidate(job)
@@ -1444,7 +1492,7 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
                 trial.write_bytes(pickle.dumps(data,protocol=4));description=copy.deepcopy(meta);description['output_sha256']=sha(trial)
                 atomic_json(trial.with_suffix('.json'),description)
                 lo,hi=job['start'],job['end']
-                if recipe in (COUPLED_LEGS,FOOT_GEOMETRY,*PHASE_LEGS,*PLATFORM_PHASE) or (recipe=='coupled_body_support' and job.get('restore_support_deficit')):
+                if recipe in (COUPLED_LEGS,CROSS_FOOT,FOOT_GEOMETRY,*PHASE_LEGS,*PLATFORM_PHASE) or (recipe=='coupled_body_support' and job.get('restore_support_deficit')):
                     lo,hi=detail['window']
                 trial_cache=fork(cache,changed=(lo,hi))
                 proposed=evaluate(trial,description,solve,'frax',cache=trial_cache,changed=(lo,hi))
@@ -1504,7 +1552,16 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
                     np.savez_compressed(path.with_suffix('.npz'),**{k:v for k,v in data.items() if v is not None})
                     for suffix in ('.check.json','.pose_errors.npz'):shutil.copyfile(trial.with_suffix(suffix),path.with_suffix(suffix))
                     entry['reason']='improved_and_checked'
-                else:entry['reason']=reason
+                else:
+                    entry['reason']=reason
+                    if (recipe==CROSS_FOOT and allow_contact_retime
+                            and (reason=='new_jitter_frames' or reason.startswith('new_jitter_joint:'))):
+                        edges = contact_timing.pulse_edges(quality,proposed,lo,hi)
+                        gain = quality['full_self_collision']['collision_samples']-proposed['full_self_collision']['collision_samples']
+                        if edges and gain>0:
+                            contact_proposals.append(contact_timing.save_proposal(
+                                path.parent,entry['dispatch_index'],out,candidate,payload['root_rot'],(lo,hi),edges,gain))
+                            entry['contact_timing_deferred'] = list(edges)
                 entry['audit_work']=trial_cache['work']
             except (ValueError,RuntimeError,TimeoutError,OSQPException) as exc:
                 entry['reason']=str(exc);entry['error_type']=type(exc).__name__
@@ -1512,13 +1569,18 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
                 entry['status']='time_slice' if time_sliced(exc) else 'rejected'
                 if family is not None and entry['status']=='rejected' and 'primal infeasible' in entry['reason'].lower():
                     infeasible_clearance.add((job['start'],job['end'],entry['clearance_context'],family))
-            queue.complete(job,entry['status']=='kept',timed=entry['status']=='time_slice',recipe=recipe,
-                           unchanged_timeout=phase_order and entry['status']=='time_slice'
-                           and before_progress==queue.progress(job),
+            timed = entry['status']=='time_slice'
+            unchanged_timeout = phase_order and timed and before_progress==queue.progress(job)
+            queue.complete(job,entry['status']=='kept',timed=timed,recipe=recipe,
+                           unchanged_timeout=unchanged_timeout,
                            result_rows=np.c_[out,payload['root_rot']] if entry['status']=='kept' else None)
             entry['elapsed_s']=time.monotonic()-begin
             if 'solve_elapsed_s' in entry:
                 entry['validation_and_commit_elapsed_s'] = entry['elapsed_s'] - entry['solve_elapsed_s']
+            if dispatch is not None:
+                entry['resumable_progress'] = timed and not unchanged_timeout
+                entry['cleared_flags'] = sorted(old_flags - set(quality['flags']))
+                finite_dispatch.observe(entry)
             attempts.append(entry)
             print(f"refine: {job['module']} {job['start']}:{job['end']} {recipe}: {entry['status']} ({entry.get('reason','')})",flush=True)
             checkpoint('running')
@@ -1558,7 +1620,8 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
         checkpoint('running', include_pending=False)
     temporal_result,discontinuity_report = run_temporal(jitter_only=legacy_order)
     remaining_repair_s = max(0., deadline - (middle_finished_at if separate_timing else time.monotonic()))
-    shared_budget_exhausted = remaining_repair_s == 0.
+    no_candidate_fits = finite_dispatch is not None and finite_dispatch.budget_blocked
+    shared_budget_exhausted = remaining_repair_s == 0. or no_candidate_fits
     # Independently certify the persisted result for specialist-only or legacy V8 execution.
     description=copy.deepcopy(meta);description['output_sha256']=sha(path)
     atomic_json(path.with_suffix('.json'),description)
@@ -1579,6 +1642,8 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
         temporal_repair=temporal_result,discontinuities=discontinuity_report,final_fresh_audit_equal=True,
         similarity_mode='soft',shared_budget_exhausted=shared_budget_exhausted,
         a_order=a_order,temporal_reserve_s=None if available_seconds is None else deadline-specialist_deadline,
+        dispatch_policy='acceptance_progress_finite' if finite_dispatch is not None else a_order,
+        dispatch_budget_blocked=no_candidate_fits,
         **budget_details())
     atomic_json(path.parent/'repair.json',report)
     description['unified_repair']=dict(report_path='repair.json',kept_candidates=kept,similarity_mode='soft',status=status)
@@ -1588,4 +1653,6 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
     description['self_collision']['export_check']=quality['self_collision'];description['solver_velocity_check']=quality['step_velocity']
     atomic_json(path.with_suffix('.json'),description);description['_unified_quality']=quality
     description['_remaining_repair_s']=remaining_repair_s
+    if contact_proposals:
+        description['_contact_timing_proposals'] = contact_proposals
     return description
