@@ -45,11 +45,18 @@ def time_map(root_r,root_p,fps,angular_limit,linear_limit,*,eligible=None,joint_
     changed=np.flatnonzero(dt>1/fps+1e-12)
     if not len(changed):return np.arange(n,dtype=float),dict(policy=POLICY,changed=False,source_duration_s=(n-1)/fps,output_duration_s=(n-1)/fps,stretched_intervals=[],blocked_source_review_intervals=blocked)
     if keep_original_frames:
-        dt = np.ceil(dt*fps-1e-10)/fps
-    clock=np.r_[0.,np.cumsum(dt)]
-    count=int(np.ceil(clock[-1]*fps-1e-9))+1
-    output_time=np.arange(count)/fps
-    source_index=np.interp(output_time,clock,np.arange(n))
+        # Build this grid in integer frame ticks so every original anchor is
+        # exactly represented even after many thousands of frames.
+        original_ticks=np.r_[0,np.cumsum(np.ceil(dt*fps-1e-10).astype(np.int64))]
+        count=int(original_ticks[-1])+1
+        output_time=np.arange(count)/fps
+        clock=original_ticks/fps
+        source_index=np.interp(np.arange(count),original_ticks,np.arange(n))
+    else:
+        clock=np.r_[0.,np.cumsum(dt)]
+        count=int(np.ceil(clock[-1]*fps-1e-9))+1
+        output_time=np.arange(count)/fps
+        source_index=np.interp(output_time,clock,np.arange(n))
     # The final <=1 frame is a hold, not a global rescaling or a dropped tail.
     exact=np.abs(source_index-np.rint(source_index))<1e-9
     source_index[exact]=np.rint(source_index[exact])
@@ -309,7 +316,7 @@ def final_candidate(path, meta, quality, solve, mode, context=None, *, deadline=
                            inserted_root_xy='linear_between_original_poses')
             quat = actual_r.as_quat().astype(np.float32)
             exact = index == np.rint(index)
-            quat[exact] = payload['root_rot']
+            quat[exact] = payload['root_rot'][index[exact].astype(np.int64)]
             stored = robot.export_rows(fitted)
             payload.update(root_pos=stored[:,:3].copy(),dof_pos=stored[:,3:].copy(),root_rot=quat,
                            source_time_s=next_source,source_frame_float=next_source*source_fps,source_fps=source_fps)

@@ -4,6 +4,21 @@ from dex_frax.retiming import final_candidate, fit_inserted_frames, resample_tar
 from dex_frax.v8 import convert as converter
 
 
+def test_long_final_retiming_keeps_every_original_frame_index():
+    frames = 12_204
+    rotations = np.broadcast_to(np.eye(3), (frames, 3, 3))
+    positions = np.zeros((frames, 3))
+    joints = np.zeros((frames, 1))
+    joints[0, 0] = -1
+    index, report = time_map(rotations, positions, 50., None, None,
+                             joint_positions=joints, joint_limits=[10.],
+                             keep_original_frames=True)
+    assert report['changed']
+    assert len(index) == frames + 4
+    exact = index == np.rint(index)
+    np.testing.assert_array_equal(index[exact], np.arange(frames))
+
+
 def test_inserted_frame_uses_ik_and_preserves_original_poses(dex_synthetic_clip):
     # Perturb one shoulder motor to require retiming at 50 Hz.
     cfg, targets, baseline = dex_synthetic_clip

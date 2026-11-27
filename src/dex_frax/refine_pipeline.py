@@ -1372,7 +1372,7 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
                 if time.monotonic() >= local_deadline:
                     raise TimeoutError('specialist_candidate_deadline')
                 aligned=detail.pop('_aligned_reference',None) if isinstance(detail,dict) else None
-                platform_protection=detail.pop('_platform_protected_frames',None)
+                platform_protection=detail.pop('_platform_protected_frames',None) if isinstance(detail,dict) else None
                 rotation=detail.pop('_pelvis_rotations',None) if recipe in (PELVIS_CONTACT,PELVIS_CONTACT_RESTORE) else None
                 entry['detail']=detail
                 candidate=robot.export_rows(candidate).astype(float)

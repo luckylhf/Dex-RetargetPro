@@ -108,7 +108,8 @@ def test_plan_fresh_and_continuation_share_the_specialist_to_segment_handoff(tmp
         np.testing.assert_array_equal(pickle.loads(path.read_bytes())['root_rot'],payload['root_rot'])
 
 
-def test_default_flow_runs_jitter_in_the_a_specialist_queue(tmp_path, monkeypatch):
+@pytest.mark.parametrize('detail', [None, [{'iteration': 1}]])
+def test_default_flow_runs_jitter_in_the_a_specialist_queue(tmp_path, monkeypatch, detail):
     from dex_frax import acceptance, refine_pipeline, segment_refine
 
     robot, targets, path, payload, meta = neutral_clip(tmp_path)
@@ -124,6 +125,8 @@ def test_default_flow_runs_jitter_in_the_a_specialist_queue(tmp_path, monkeypatc
 
     def reject(robot, targets, rows, original, weights, model, job, recipe, *args):
         calls.append((job['module'], recipe))
+        if detail is not None:
+            return rows.copy(), detail
         raise ValueError('test_rejection')
 
     def unexpected_v8(*args, **kwargs):
@@ -137,6 +140,8 @@ def test_default_flow_runs_jitter_in_the_a_specialist_queue(tmp_path, monkeypatc
                   repair_modules={'jitter', 'segment_solvers'})
     report = json.loads((tmp_path/'repair.json').read_text())
     assert calls[:2] == [('jitter', 'temporal'), ('jitter', 'temporal_more')]
+    if detail is not None:
+        assert report['attempts'][0]['detail'] == detail
     assert report['refine_flow'] == 'A'
     assert report['budget_source'] == 'default_unlimited'
     assert not report['shared_budget_exhausted']
