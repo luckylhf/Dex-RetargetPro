@@ -17,6 +17,44 @@ _RECHECK_COMPATIBLE = {
     ),
 }
 
+# Retain the exact Refine A migration from the shared-pool deployment.
+# The transition permits scheduling-only changes and the two known fixes to
+# candidate metadata and integer-frame retiming. All artifact checks still run.
+_POOL_PREVIOUS = {
+    'cascade.py': ('9c733f866fd3dc0ec4f3d7fc5af88f309726e1eda72ca6cc343cab32aa088ae1',),
+    'managed_batch.py': ('2d8939296717d1379ed129899599371d8dddb7bf741fa3a05240e2e81deaf7eb',),
+    'resources.py': ('3762a57e75f4835978173577d1d94e37138e47161c481ac4400a4f6fdc4b9d97',),
+    'memory_pool.py': (None,),
+    'memory_pool_batch.py': (None,),
+    'refine_resume.py': (
+        '9df7b27e6e8e26dce9a1f315568c4ce1ea337e8182e74830bafbc83fa4fdf452',
+        'cd1072a611d348b6d4d082a3cfbbdc6f5ad310e4a3ea547f934fb7b9a8ccd455',
+        '634f75d49fbaa93ed99fcad4338553896c086ee22815e3f7fcb49c5b83127c6f',
+    ),
+    'refine_pipeline.py': (
+        '6ad937c38d2467e162745535e3dbd016438f74f096ad1196c7b1d1096e3d70f0',
+        '57f3c3c85e0a7dc5c013fe26046f5e882f5a964ce58942e5b3bbe471b863c44e',
+    ),
+    'retiming.py': ('bb4b08b97612ec8734ceee8f5d535e6a752867022a2025802dbeb10ea6806332',),
+}
+_POOL_FIXED = {
+    'refine_pipeline.py': '0c9683e77a98f21877a1677e45c08e9414a8098bee99731fee865ddb9874b5b4',
+    'retiming.py': 'b83626cf6db78716a47754377e5eedb76e3bcb5ee085dbc9b41c368171452de0',
+}
+
+
+def _pool_compatible(before, after):
+    from .cli import sha
+    changed = {name for name in before.keys() | after.keys() if before.get(name) != after.get(name)}
+    if not changed or not changed <= _POOL_PREVIOUS.keys() or 'memory_pool_batch.py' not in after:
+        return False
+    root = Path(__file__).parent
+    for name in changed:
+        expected = _POOL_FIXED.get(name) or sha(root/name)
+        if before.get(name) not in _POOL_PREVIOUS[name] or after.get(name) != expected:
+            return False
+    return True
+
 
 def locate(value):
     p=Path(value).resolve()
@@ -52,8 +90,11 @@ def verify(folder,identity,recheck=False):
         run=json.loads((folder/'run.json').read_text())
         for name in ('motion.json','motion.diagnostics.npz','quality.json'):
             if run.get('files',{}).get(name)!=sha(folder/name):raise ValueError('Recheck artifact hash changed: '+name)
+    pool_migration = (old['conversion_contract'].get('refine_flow') == 'A'
+                      and (folder/'refine_state.json').is_file()
+                      and _pool_compatible(old['implementation'],identity['implementation']))
     for key in ('input_sha256','assets','implementation','frax_implementation','runtime'):
-        if recheck and key=='implementation':continue
+        if (recheck or pool_migration) and key=='implementation':continue
         if old[key]!=identity[key]:raise ValueError('Continuation identity mismatch: '+key)
     fast=old['conversion_contract'].get('profile')=='fast'
     def contract(value):

@@ -719,8 +719,8 @@ def repair_output(robot,targets,xs,meta,payload,path,solve,repair_budget=None,co
         for contact in t.get('body_contacts',()):
             for frame in np.flatnonzero(contact['mode']):
                 trusted_support[frame] |= preserve_contact(contact,frame)
-        phase=np.column_stack([trusted_support,*[foot['phase'] for foot in t['sides'].values()]])
-        phase_edges=np.r_[0,np.flatnonzero(np.any(phase[1:]!=phase[:-1],axis=1))+1,len(out)]
+        support_phases=np.column_stack([trusted_support,*[foot['phase'] for foot in t['sides'].values()]])
+        phase_edges=np.r_[0,np.flatnonzero(np.any(support_phases[1:]!=support_phases[:-1],axis=1))+1,len(out)]
         if phase_combinations:
             changed_flight=np.flatnonzero(np.diff(t['reconstructible_flight']))+1
             repair_phase_edges=np.union1d(phase_edges,changed_flight)

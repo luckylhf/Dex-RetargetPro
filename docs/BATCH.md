@@ -35,6 +35,19 @@ dex-frax batch manifest.json outputs/batch-refine \
 
 `--segmented` 把已校验的 Frax 初解落盘后交给单独的精修进程。`--capacity-scheduler` 可按 CPU 和内存预算派发初解和精修任务。用 `dex-frax batch --help` 查看资源配置参数。
 
+## v3 内存共享池
+
+`dex-frax-pool` 使用 Refine A 处理带哈希的清单。每个 worker 启动时占用 2.75 GiB 基础额度。加载、初解分块、专项精修和复检在分配前申请增量，临时额度在安全阶段边界归还。整个批次和单条精修默认使用无限时间预算。
+
+```sh
+dex-frax-pool manifest.json outputs/pool-refine --workers auto
+dex-frax-pool manifest.json outputs/pool-refine --workers auto --resume
+```
+
+共享池根据整机和 Linux 进程组余量放行。扣除已发放额度后，低于 8 GiB 暂停新增额度，持续回到 10 GiB 后恢复。启动新 worker 后应至少剩 12 GiB。`status.json` 记录进度与等待情况，`memory_events.jsonl` 记录发放、回收、停发和恢复事件。
+
+每条动作的结果位于 `<id>/attempt_*/frax`。续跑沿用原清单与转换选项，验证已完成的输出，未完成项从最近的有效检查点续跑。也可在清单里为单条动作填 `continue_from`，指向同一输入的可信检查点。共享池清单还支持 `source: "smplx"`，输入适配参数与 `dex-frax convert` 相同，例如 `--input-fps 30 --grounding contact`。
+
 ## 续跑与诊断
 
 常规批次使用原清单、原输出目录和原转换选项追加 `--resume`。核对输入、源码和模型后，已完成项可以保留。单条动作可用 `convert --continue-from` 从报告指定的检查点接续并写入新目录。`--recheck-from` 在兼容的代码更新后重新验收和生成候选队列。仍有残差的 V8 超时段可在续跑时重试。

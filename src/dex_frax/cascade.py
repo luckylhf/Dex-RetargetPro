@@ -15,19 +15,20 @@ from .contract import DEFAULT_FOOT_CONTACT, DEFAULT_REFINE_FLOW
 from .dispatch import STAGES,pipeline_stages,use_unified
 
 
-def load_manifest(path, contents=None):
+def load_manifest(path, contents=None, *, allow_smplx=False):
     path = Path(path).resolve()
     manifest = json.loads(path.read_bytes() if contents is None else contents)
     cases = manifest.get('cases')
     if not isinstance(cases,list) or not cases:
         raise ValueError('Manifest needs a nonempty cases list')
+    sources = ('auto', 'lafan', 'soma', 'mocap', 'smplx') if allow_smplx else ('auto', 'lafan', 'soma', 'mocap')
     seen=set();validated=[]
     for row in cases:
         name=row['id']
         if not isinstance(name,str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*',name) or name in seen:
             raise ValueError('Case IDs must be unique safe directory names: '+str(name))
         seen.add(name)
-        if row['source'] not in ('auto','lafan','soma','mocap'):
+        if row['source'] not in sources:
             raise ValueError('Unknown source for '+name)
         if 'ground_running' in row and not isinstance(row['ground_running'], bool):
             raise ValueError('ground_running must be true or false for '+name)

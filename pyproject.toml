@@ -17,6 +17,7 @@ preview = ["imageio", "imageio-ffmpeg", "pillow"]
 
 [project.scripts]
 dex-frax = "dex_frax.cli:main"
+dex-frax-pool = "dex_frax.memory_pool_batch:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

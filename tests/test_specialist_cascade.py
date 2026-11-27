@@ -110,11 +110,12 @@ def test_plan_fresh_and_continuation_share_the_specialist_to_segment_handoff(tmp
 
 @pytest.mark.parametrize('detail', [None, [{'iteration': 1}]])
 def test_default_flow_runs_jitter_in_the_a_specialist_queue(tmp_path, monkeypatch, detail):
-    from dex_frax import acceptance, refine_pipeline, segment_refine
+    from dex_frax import acceptance, refine_pipeline, resource_events, segment_refine
 
     robot, targets, path, payload, meta = neutral_clip(tmp_path)
     evaluate = acceptance.evaluate
     calls = []
+    resource_phases = []
 
     def mark_jitter(*args, **kwargs):
         quality = evaluate(*args, **kwargs)
@@ -135,11 +136,14 @@ def test_default_flow_runs_jitter_in_the_a_specialist_queue(tmp_path, monkeypatc
     monkeypatch.setattr(acceptance, 'evaluate', mark_jitter)
     monkeypatch.setattr(refine_pipeline, 'propose', reject)
     monkeypatch.setattr(segment_refine, 'refine', unexpected_v8)
+    monkeypatch.setenv('DEX_SCHEDULE_MEMORY_BYTES', str(2816 * 1024**2))
+    monkeypatch.setattr(resource_events, 'phase', lambda name, **_: resource_phases.append(name))
     repair_output(robot, targets, None, meta, payload, path, None,
                   segment_cascade=True,
                   repair_modules={'jitter', 'segment_solvers'})
     report = json.loads((tmp_path/'repair.json').read_text())
     assert calls[:2] == [('jitter', 'temporal'), ('jitter', 'temporal_more')]
+    assert resource_phases.count('local_repair') >= 3
     if detail is not None:
         assert report['attempts'][0]['detail'] == detail
     assert report['refine_flow'] == 'A'
