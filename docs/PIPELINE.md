@@ -91,6 +91,6 @@ flowchart TD
 
 `refine` 默认可通过局部补帧处理实际电机超速。补帧保留已有姿态，新增帧骨盆 XY 按时间线性插值。候选须通过速度、碰撞、净空、支撑和接缝复检才会采用。需要固定输出时间网格时可用 `--no-allow-local-slowdown`。`motion.json` 的 `retiming.final_adaptation` 记录采用与拒收原因。
 
-若跨脚候选通过几何和支撑检查，且仅新增孤立速度脉冲，会按原网格暂存。末尾阶段在确认底稿仍相容后，可试插少量帧消除脉冲并重新独立验收。`retiming.contact_impulse_attempt` 记录未采用原因，补帧前的检查点保存在 `pre_final_retime`。
+若跨脚候选通过几何和支撑检查，且仅新增孤立速度脉冲，会按原网格暂存。末尾阶段在确认底稿仍相容后，可试插少量帧消除脉冲。若新增帧的脚锚或滑移复检失败，可微调新增帧的腿部关节，再按同一门槛复检全片。`retiming.contact_impulse_attempt` 记录未采用原因，补帧前的检查点保存在 `pre_final_retime`。
 
 终验独立读取落盘轨迹。`motion.npz` 用于回放，`training.npz` 只在 `refine` 通过导出条件时生成。`repair.json` 记录专项尝试与结果。 [查看结果与排查](VALIDATION.md) · [候选采用与验收规则](SAFETY_REPAIR_RULES.md)

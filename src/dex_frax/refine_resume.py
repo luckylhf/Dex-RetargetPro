@@ -34,6 +34,7 @@ _POOL_PREVIOUS = {
     'v8/convert.py': ('2ebeb99eeb5c358956f2df36f0b0c40f4b9f8ab0c01df92a904b7f2e737223b1',
                       '3074eabe4decb905c71bb55549376cce96cb99df1cf7d565131ed2d4f8b78207'),
     'refine_resume.py': (
+        '91e6145aefe48b84cecac9ee07ec46205e84bc10eb2363fd5e72ce602fecd6a5',
         'fe0d4056b2ab5d80362ac8f90e2d98c3780c3b44fb5c06c20c08138b3907f244',
         'fba61aa2e54f51cab52afecd08e0568df8cef5a8f9a34aebe88ebcdb3c622f4f',
         '9df7b27e6e8e26dce9a1f315568c4ce1ea337e8182e74830bafbc83fa4fdf452',
@@ -51,8 +52,8 @@ _POOL_PREVIOUS = {
     'refine_dispatch_budget.py': (None,'3eea4363bd04eb2a7e9f39d81742d81db63a6fa959abf47bda9886678a4bb884'),
     'refine_queue.py': ('d21864417bcaefd791586f649886aa9e92c6841dccf7f7da24a90a370e8d43b2',),
     'refine_budget.json': ('61b5f89498c7f034893d1acca5a8e91c7bdcd9ad8c27ca469635b8aea11ae1ac',),
-    'cross_foot_repair.py': (None,),
-    'contact_timing.py': (None,),
+    'cross_foot_repair.py': (None,'f981b8a0838b7beb75156b2704d5ec29e9966f586e9221c0c77b74a39d46757e'),
+    'contact_timing.py': (None,'ee73c0f5fcebb3cfb2ddc7a8c1be358d17643b617b08f65a8d8063bf13182fef'),
     'retiming.py': ('bb4b08b97612ec8734ceee8f5d535e6a752867022a2025802dbeb10ea6806332',),
 }
 _POOL_FIXED = {

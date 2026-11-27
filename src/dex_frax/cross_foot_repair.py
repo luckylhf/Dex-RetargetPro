@@ -23,6 +23,21 @@ from .v8.trajectory import _qp
 RECIPE = 'cross_foot_contact_reconstruction'
 
 
+def support_point(robot, targets, row, frame, side, *, jacobian=False):
+    """Measure the anchored sole point and lowest sole height."""
+    robot.set(row,targets['root_r'][frame])
+    group = robot.sides[side]
+    body = group['foot']
+    pivot = targets['sides'][side]['pivots'][frame]
+    low = robot.lowest(side)
+    value = np.r_[robot.point(body,pivot)[:2],robot.point(body,low)[2]]
+    if not jacobian:
+        return value
+    ids = group['leg']
+    jac = np.vstack((robot.jac(body,pivot)[0][:2,ids],robot.jac(body,low)[0][2:,ids]))
+    return value,jac
+
+
 def jobs(model, targets, samples):
     """Group cross-foot hits across a foot exchange and include both joins."""
     feet = {group['foot'] for group in model.r.sides.values()}
@@ -117,18 +132,7 @@ class ContactWindow:
         return count,-worst
 
     def point(self, row, frame, side, jacobian=False):
-        robot = self.robot
-        robot.set(row,self.targets['root_r'][frame])
-        group = robot.sides[side]
-        body = group['foot']
-        pivot = self.targets['sides'][side]['pivots'][frame]
-        low = robot.lowest(side)
-        value = np.r_[robot.point(body,pivot)[:2],robot.point(body,low)[2]]
-        if not jacobian:
-            return value
-        ids = group['leg']
-        jac = np.vstack((robot.jac(body,pivot)[0][:2,ids],robot.jac(body,low)[0][2:,ids]))
-        return value,jac
+        return support_point(self.robot,self.targets,row,frame,side,jacobian=jacobian)
 
     def active(self, frame):
         return (side for side,foot in self.targets['sides'].items() if foot['contact'][frame]>0)

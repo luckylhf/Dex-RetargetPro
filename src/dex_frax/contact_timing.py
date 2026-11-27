@@ -8,13 +8,18 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
+from scipy.linalg import lstsq
 from scipy.spatial.transform import Rotation,Slerp
 
+from .airborne import protected_height
 from .cli import atomic_json,sha
+from .cross_foot_repair import support_point
 from .retiming import _retime_diagnostics,inserted_geometry_regression,resample_targets
 from .source_integrity import eligible_timing_intervals
+from .support_quality import same_support_step
 from .temporal_quality import assess
 from .v8.self_collision import CollisionModel
+from .v8.support_acceptance import SUPPORT_ACCEPTANCE_M
 
 
 def pulse_edges(before, after, start, end):
@@ -115,13 +120,49 @@ def clean_subdivision(payload, rows, diagnostics, quality, eligible, edges, dead
     return None
 
 
-def _write_candidate(path, payload, rows, index, meta, diagnostics, sampled, robot, intervals):
-    grid = np.arange(len(rows))
-    exact = index==np.rint(index)
-    actual = Slerp(grid,Rotation.from_quat(payload['root_rot']))(index)
-    quat = actual.as_quat().astype(np.float32)
-    quat[exact] = payload['root_rot']
-    stored = robot.export_rows(np.column_stack([np.interp(index,grid,col) for col in rows.T]))
+def polish_inserted_support(robot, targets, original, fitted, index, deadline):
+    """Restore the anchor and slip allowances by moving only inserted leg poses."""
+    import time
+
+    rows = fitted.astype(float)
+    old_grid = np.arange(len(original))
+    reference = np.column_stack([np.interp(index,old_grid,col) for col in original.T])
+    inserted = index!=np.rint(index)
+    for i in np.flatnonzero(inserted & ~protected_height(targets,len(rows))):
+        for side,foot in targets['sides'].items():
+            if foot['contact'][i]<=0:
+                continue
+            prior = support_point(robot,targets,reference[i],i,side)[:2]
+            anchor = foot['anchors'][i,:2]
+            limits = [(anchor,max(SUPPORT_ACCEPTANCE_M,np.linalg.norm(prior-anchor)))]
+            for j in (i-1,i+1):
+                if (foot['phase'][i]==foot['phase'][j] and same_support_step(foot,max(i,j))):
+                    neighbor = support_point(robot,targets,reference[j],j,side)[:2]
+                    center = support_point(robot,targets,rows[j],j,side)[:2]
+                    limits.append((center,max(SUPPORT_ACCEPTANCE_M,np.linalg.norm(prior-neighbor))))
+            ids = robot.sides[side]['leg']
+            for _ in range(8):
+                if time.monotonic()>=deadline:
+                    return fitted
+                changed = False
+                for center,bound in limits:
+                    point,jac = support_point(robot,targets,rows[i],i,side,jacobian=True)
+                    delta = point[:2]-center
+                    norm = np.linalg.norm(delta)
+                    if norm<=bound+1e-6:
+                        continue
+                    goal = center+delta*((bound-4e-6)/norm)
+                    step = lstsq(jac,np.r_[goal-point[:2],0.],lapack_driver='gelsy')[0]
+                    rows[i,ids] += np.clip(step,-.002,.002)
+                    changed = True
+                if not changed:
+                    break
+    return robot.export_rows(rows)
+
+
+def _write_candidate(path, payload, stored, index, meta, diagnostics, sampled, quat, intervals):
+    n = len(payload['root_pos'])
+    grid = np.arange(n)
     source_time = np.interp(index,grid,payload['source_time_s'])
     source_fps = float(payload.get('source_fps',meta['input_fps']))
     data = dict(payload,root_pos=stored[:,:3],dof_pos=stored[:,3:],root_rot=quat,
@@ -129,7 +170,7 @@ def _write_candidate(path, payload, rows, index, meta, diagnostics, sampled, rob
     path.write_bytes(pickle.dumps(data,protocol=4))
     np.savez_compressed(path.with_suffix('.npz'),**{k:v for k,v in data.items() if v is not None})
     diagnostics = dict(diagnostics)
-    nearest = _retime_diagnostics(diagnostics,index,len(rows))
+    nearest = _retime_diagnostics(diagnostics,index,n)
     if 'head_r' in sampled:
         from .v8.source import head_relative_target
         diagnostics['head_relative_target'] = head_relative_target(sampled['torso_r'],sampled['head_r'])
@@ -155,13 +196,13 @@ def _write_candidate(path, payload, rows, index, meta, diagnostics, sampled, rob
                         policy='contact_impulse_local_slowdown_v1',pre_final_index=index)
     timing = description.setdefault('retiming',{})
     timing.update(changed=True,time_map=time_map.name,source_time_sha256=sha(time_map),
-                  added_frames=int(timing.get('added_frames',0))+len(index)-len(rows),
+                  added_frames=int(timing.get('added_frames',0))+len(index)-n,
                   final_adaptation=dict(candidate='contact_impulse_local_slowdown',
                       stage='after_temporal_cleanup',stretched_intervals=intervals,
-                      added_frames=len(index)-len(rows),original_frames_fixed=True))
+                      added_frames=len(index)-n,original_frames_fixed=True))
     description.update(output_frames=len(index),output_sha256=sha(path))
     atomic_json(path.with_suffix('.json'),description)
-    return description,stored,Rotation.from_quat(quat).as_matrix()
+    return description
 
 
 def finish(path, meta, quality, solve, mode, context, entries, deadline):
@@ -222,20 +263,36 @@ def finish(path, meta, quality, solve, mode, context, entries, deadline):
             failures.append(dict(edges=sorted(edges),reason='blocked_source_or_unresolved_pulse'))
             continue
         index,intervals = plan
+        sampled = resample_targets(targets,robot,index)
+        grid = np.arange(len(original))
+        exact = index==np.rint(index)
+        quat = Slerp(grid,Rotation.from_quat(rotations))(index).as_quat().astype(np.float32)
+        quat[exact] = rotations
+        mapped = dict(sampled,source_root_r=sampled['root_r'],root_r=Rotation.from_quat(quat).as_matrix())
+        rows = robot.export_rows(np.column_stack([np.interp(index,grid,col) for col in provisional.T]))
+        geometry = inserted_geometry_regression(robot,mapped,model,original,rows,index)
+        polished = []
+        if geometry and geometry.startswith('inserted_support_regression:'):
+            fixed = polish_inserted_support(robot,mapped,original,rows,index,planning_deadline)
+            geometry = inserted_geometry_regression(robot,mapped,model,original,fixed,index)
+            if not geometry:
+                polished = np.flatnonzero(np.any(fixed!=rows,axis=1)).tolist()
+                rows = fixed
+        if geometry:
+            failures.append(dict(edges=intervals,reason=geometry))
+            continue
         folder = path.parent
         with tempfile.TemporaryDirectory(prefix='.contact-timing-',dir=folder.parent) as temp:
             work = Path(temp)
             candidate = work/'candidate'
             candidate.mkdir()
             blob = candidate/path.name
-            sampled = resample_targets(targets,robot,index)
-            next_meta,rows,actual = _write_candidate(blob,payload,provisional,index,meta,diag,sampled,robot,intervals)
+            next_meta = _write_candidate(blob,payload,rows,index,meta,diag,sampled,quat,intervals)
+            next_meta['retiming']['final_adaptation']['support_polished_frames'] = polished
             checked = evaluate(blob,next_meta,solve,mode)
-            mapped = dict(sampled,source_root_r=sampled['root_r'],root_r=actual)
-            geometry = inserted_geometry_regression(robot,mapped,model,original,rows,index)
             old_collision = quality['full_self_collision']
             collision = checked['full_self_collision']
-            reason = geometry or quality_guard(quality,checked,True)
+            reason = quality_guard(quality,checked,True)
             added_flags = sorted(set(checked['flags'])-set(quality['flags']))
             if not reason and added_flags:
                 reason = 'new_quality_flags:'+','.join(added_flags)
