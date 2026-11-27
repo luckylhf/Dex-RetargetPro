@@ -632,9 +632,10 @@ def _run(args,slot_factory,monitor):
                     item['peak']=item['grant']
                 else:item['peak']=memory_queue.peak(mode,cases[i]['source'],frames[i],admission.value['stages'][mode]['bytes_per_output_frame'],estimate)
             snap=monitor()
-            victim=res.reclaim_idle(slots,active,usage,snap,reserve)
+            victim=res.reclaim_idle(slots,active,usage,snap,reserve,queue_empty=not queue)
             if victim is not None:
-                victim.close();pool_stats['pressure_recycles']+=1
+                victim.close()
+                pool_stats['pressure_recycles' if queue else 'tail_idle_recycles']+=1
                 # Both snapshot and PSS must be refreshed together next loop.
                 continue
             critical,waiting=pressure(snap,reserve)

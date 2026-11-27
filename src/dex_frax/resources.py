@@ -171,16 +171,16 @@ def select_idle(slots,active,usage):
 
 
 def reclaim_idle(slots, active, usage, snapshot, reserve, candidate=None, candidate_peak=0,
-                 shared=0, *, running=()):
-    """Pick one idle worker, using the same ledger as the failed admission.
+                 shared=0, *, running=(), queue_empty=False):
+    """Pick one idle worker after the queue drains or when memory is needed.
 
-    Keep the candidate available for reuse except under actual memory pressure.
-    The caller takes a new memory sample before granting anything.
+    Keep warm workers for queued work where memory allows. A drained queue
+    can spawn a replacement later if an active attempt needs to requeue.
     """
     headroom, _, required = admission_budget(snapshot, reserve, running, candidate_peak,
                                              usage.get(candidate, 0), shared)
     pressure = headroom < 0 or snapshot['cgroup_headroom'] < cgroup_floor(snapshot)
-    if not pressure and (candidate is None or required <= headroom):
+    if not queue_empty and not pressure and (candidate is None or required <= headroom):
         return None
     idle = [slot for slot in slots if slot not in active and slot.pid and usage.get(slot, 0)>0
             and (pressure or slot is not candidate)]
