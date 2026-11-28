@@ -37,14 +37,23 @@ dex-frax batch manifest.json outputs/batch-refine \
 
 ## CPU 与内存共享池
 
-`dex-frax-pool` 使用 Refine A 处理带哈希的清单。每个 worker 启动时同时分配一个 CPU 槽和 2.75 GiB 基础内存。Linux 优先使用独立物理核，并参考当前的外部 CPU 负载调整准入。加载、初解分块、专项精修和复检在分配前申请增量，临时额度在安全阶段边界归还。单条专项精修使用相同的默认额度或 `--repair-budget unlimited`。从本轮检查点自动恢复时沿用已用额度。
+`dex-frax-pool` 支持 Fast 和 Refine A，省略 `--mode` 时使用 Refine A。每个 worker 启动时同时分配一个 CPU 槽和 2.75 GiB 基础内存。Linux 优先使用独立物理核，物理核占满后可使用其余逻辑核，并参考外部 CPU 负载调整准入。加载、FRAX 分块和复检按阶段申请增量，临时额度在安全阶段边界归还。Refine A 的专项精修也使用共享池，单条精修使用默认额度或 `--repair-budget unlimited`。
 
 ```sh
-dex-frax-pool manifest.json outputs/pool-refine --workers auto
-dex-frax-pool manifest.json outputs/pool-refine --workers auto --resume
+dex-frax-pool manifest.json outputs/pool-fast --mode fast
+dex-frax-pool manifest.json outputs/pool-fast --mode fast --resume
+dex-frax-pool manifest.json outputs/pool-refine --mode refine
 ```
 
-共享池按顺序处理在跑 worker 的必要内存请求、待启动动作、算子的可选并行请求。扣除已发放但尚未使用的额度后，整机余量默认低于 8 GiB 暂停新增额度，持续回到 10 GiB 后恢复。启动新 worker 或发放可选并行资源后，整机默认至少剩 12 GiB，Linux cgroup 至少剩 1 GiB。可以用 `--memory-watermarks DANGER RECOVER START` 为受控运行指定整机水位，单位为 GiB。
+共享池按顺序处理在跑 worker 的必要内存请求、待启动动作、算子的可选并行请求。编译仍逐个派发。已有 worker 仅等待编译时，只要 CPU 和基础内存额度充足，就可以继续启动新任务。
+
+Fast 的初始可用预算为启动时主机可用内存减 2 GiB。运行中扣除已发放但尚未使用的额度，继续检查 2 GiB 整机余量。Refine 默认低于 8 GiB 暂停新增额度，持续回到 10 GiB 后恢复，启动新 worker 或发放可选并行资源后至少剩 12 GiB。两种模式启动新 worker 时，Linux cgroup 至少剩 1 GiB。可用 `--memory-watermarks DANGER RECOVER START` 指定三个递增的整机水位，单位为 GiB。
+
+Fast 的 2.75 GiB 基础额度用于冷启动。后续安全阶段按实际驻留内存、阶段工作区和动作帧数申请和归还额度。冷编译、首次求解块和外部 SMPL-X 预处理保留额外保障。每个运行项的 `grant_bytes`、`resident_bytes`、`unused_bytes` 分别记录当前额度、实占和未用额度。
+
+Fast 优先用空闲 worker 接下一条动作，复用模型和 FRAX 编译缓存，按热加载的增量需求领取额度。暂时开不出新进程时，空闲 worker 可以等候接单。队列清空、出现内存压力或在途任务需要额外内存时及时回收，持续空闲 60 秒也会回收。
+
+待发动作多于在途动作时，按 CPU 和内存余量增加并发。待发动作已可由在途进程再各接一条时，优先等热进程。等待窗口取同类输入最近至多五次冷启动到首个 FRAX 求解块的中位用时，最长 60 秒。窗口内无任务接单，就允许新开一路。热进程可以随时接单。
 
 A 的全片几何复检默认串行。加 `--audit-workers 2` 可启用并行实验。队列为空且没有必要内存请求等待时，96 帧及以上的全片复检可申请一个额外 CPU 槽和辅助进程内存。辅助进程用自己的 MuJoCo 状态检查全身自碰，主进程同时检查手臂碰撞和原帧及帧间穿地。两边汇总后沿用同一终验。小范围增量复检沿用本地缓存。资源不足时按串行复检，辅助进程退出后归还额度。Linux 将辅助进程绑定到获准的 CPU，macOS 由系统安排核位。
 
@@ -52,7 +61,7 @@ A 的全片几何复检默认串行。加 `--audit-workers 2` 可启用并行实
 
 `status.json` 记录进度、CPU 分配和内存等待，`memory_events.jsonl` 记录发放、回收、停发和恢复。`model_cache.json` 记录缓存准备时间及命中情况。每个 `attempt_*` 下的 `geometry_timings.jsonl` 记录全片几何复检的主进程耗时，以及辅助进程的启动、输入接收、模型准备、扫描、结果回传、退出和资源归还耗时。并行两路的时间有重叠。
 
-每条动作的结果位于 `<id>/attempt_*/frax`。续跑沿用原清单与转换选项，使用输入、目标机器人资产和产物哈希验证已完成的输出，未完成项从最近的有效检查点续跑。也可在清单里为单条动作填 `continue_from`，指向同一输入的可信检查点。共享池清单还支持 `source: "smplx"`，输入适配参数与 `dex-frax convert` 相同，例如 `--input-fps 30 --grounding contact`。
+每条动作的结果位于 `<id>/attempt_*/frax`。续跑沿用原清单、模式和转换选项，使用输入、目标机器人资产和产物哈希验证已完成的输出。Fast 输出预览用的 `motion.npz`，中断项重新转换。Refine A 的未完成项可从最近的有效检查点继续，沿用本轮已用额度，也可在清单里为单条动作填 `continue_from` 指向同一输入的可信检查点。共享池清单还支持 `source: "smplx"`，输入适配参数与 `dex-frax convert` 相同，例如 `--input-fps 30 --grounding contact`。
 
 ## 续跑与诊断
 

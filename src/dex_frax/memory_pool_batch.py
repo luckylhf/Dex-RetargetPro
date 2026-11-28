@@ -1,6 +1,7 @@
-"""Run a verified Refine A manifest with joint CPU and memory admission."""
+"""Run verified Fast and Refine A manifests with joint CPU and memory admission."""
 import argparse
 from collections import Counter, deque
+import contextlib
 from hashlib import file_digest, sha256
 import json
 import math
@@ -9,6 +10,7 @@ from multiprocessing.connection import wait
 import os
 from pathlib import Path
 import signal
+from statistics import median
 import subprocess
 import sys
 import time
@@ -16,7 +18,10 @@ import traceback
 
 from . import resources
 from .dynamic_resources import CpuAdmission
-from .memory_pool import BASE, DANGER, GIB, RECOVER, START, JointPool, Lease, requested_total, set_workspace_gate
+from .memory_pool import BASE, DANGER, GIB, RECOVER, START, JointPool, Lease, fast_warm_grant, requested_total, set_workspace_gate
+
+FAST_HOST_RESERVE_GIB = 2.
+IDLE_TIMEOUT_SECONDS = 60.
 
 
 def read(path):
@@ -36,7 +41,7 @@ def sha(path):
 
 def arguments(job, output=None):
     return dict(job['options'], input=job['input'], output=output, source=job['source'],
-                mode='frax', profile='refine', refine_flow='A', max_frames=None,
+                mode='frax', profile=job['profile'], refine_flow='A', max_frames=None,
                 unified_repair=True, continue_from=job.get('checkpoint'),
                 resume_same_round=job.get('resume_same_round', False),
                 ground_running=job.get('ground_running', False))
@@ -51,8 +56,15 @@ def publications(folder, job):
         identity = read(folder/'identity.json')
         if run['status'] != 'complete' or run['quality'] not in ('accepted','accepted_with_notes','review'):
             return None
+        contract = identity['conversion_contract']
+        profile = job['profile']
+        if contract.get('profile') != profile:
+            return None
+        if profile == 'fast' and quality['status'] != 'review':
+            return None
+        if profile == 'refine' and contract.get('refine_flow') != 'A':
+            return None
         if (run['quality'] != quality['status'] or identity['input_sha256'] != job['input_sha256']
-                or identity['conversion_contract']['refine_flow'] != 'A'
                 or identity['assets'] != job['assets']
                 or quality['model_sha256'] != job['assets'][MODEL_XML]
                 or run['fingerprint'] != identity['fingerprint']):
@@ -73,6 +85,8 @@ def publications(folder, job):
 
 
 def verified_seed(folder, job):
+    if job['profile'] == 'fast':
+        return None, 'Fast does not use refine checkpoints'
     from .cli import identity
     from .refine_resume import locate, verify
     try:
@@ -102,7 +116,7 @@ def prepare(args, content):
     jobs = []
     for row in rows:
         job = {key: row[key] for key in ('input', 'input_sha256', 'source')}
-        job.update(key=row['id'], options=options, ground_running=row.get('ground_running', False),
+        job.update(key=row['id'], profile=args.mode, options=options, ground_running=row.get('ground_running', False),
                    audit_workers=args.audit_workers)
         if job['source'] == 'auto' and Path(job['input']).suffix.lower() in ('.pt', '.pkl', '.npz'):
             job['source'] = 'smplx'
@@ -130,11 +144,16 @@ def worker(connection, job, folder, cpu):
                       NUMEXPR_NUM_THREADS='1', VECLIB_MAXIMUM_THREADS='1',
                       CUDA_VISIBLE_DEVICES='', JAX_PLATFORMS='cpu', JAX_ENABLE_X64='1')
     os.environ.setdefault('DEX_FRAX_COMPILE_LOCK_DIR',str(resources.state_root()/'compiler'))
+    os.environ.setdefault('JAX_COMPILATION_CACHE_DIR',str(resources.state_root()/'jax_cache'))
+    os.environ.setdefault('JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS','0')
+    os.environ.setdefault('DEX_FRAX_KERNEL_CACHE_SIZE','2')
     os.environ['DEX_FRAX_BLOCK_MEMORY']='1'
     os.environ['DEX_SCHEDULE_MEMORY_BYTES']=str(BASE)  # enables safe specialist boundary events
     from .cli import convert
     from .resources import process_memory, release_memory
     from .resource_events import set_gate, phase
+    resident_models = None
+    reusable = job['profile']=='fast'
     last_trim, last_phase = 0., None
     workspace_active = False
 
@@ -173,34 +192,53 @@ def worker(connection, job, folder, cpu):
         return cpus
 
     set_gate(gate)
-    set_workspace_gate(workspace_gate if job['audit_workers'] == 2 else None)
-    with (folder.parent/'worker.log').open('w', buffering=1) as log:
-        import contextlib
-        with contextlib.redirect_stdout(log), contextlib.redirect_stderr(log):
-            try:
-                if sha(Path(job['input'])) != job['input_sha256']:
-                    raise ValueError('Input changed after manifest verification')
-                phase('loading')
-                from .model_cache import enable_audit_models, prepare_audit_models
-                from .v8.audit import set_geometry_timing_path
-                models = job['models']
-                if models is None:
-                    cache_started = time.perf_counter()
-                    models = prepare_audit_models(job['assets'], resources.state_root()/'model_cache')
-                    connection.send(dict(model_cache=dict(preflight_s=time.perf_counter()-cache_started, models=models)))
-                model_started = time.perf_counter()
-                enable_audit_models(models)
-                write(folder.parent/'model_load.json', dict(base_mjb_s=time.perf_counter()-model_started))
-                set_geometry_timing_path(folder.parent/'geometry_timings.jsonl')
-                if job['source'] == 'smplx' and not job.get('checkpoint'):
-                    # The existing adapter allocates its CPU model in a child.
-                    phase('preprocessing')
-                convert(argparse.Namespace(**arguments(job,str(folder))))
-                connection.send(dict(result='returned'))
-            except Exception as error:
-                traceback.print_exc()
-                connection.send(dict(result='failed', error=repr(error)))
-    connection.close()
+    try:
+        while True:
+            last_trim, last_phase = 0., None
+            set_workspace_gate(workspace_gate if job['audit_workers']==2 else None)
+            with (folder.parent/'worker.log').open('w', buffering=1) as log:
+                with contextlib.redirect_stdout(log), contextlib.redirect_stderr(log):
+                    try:
+                        phase('loading')
+                        if sha(Path(job['input'])) != job['input_sha256']:
+                            raise ValueError('Input changed after manifest verification')
+                        model_s = 0.
+                        reused_model = resident_models is not None
+                        if not reused_model:
+                            from .model_cache import enable_audit_models, prepare_audit_models
+                            models = job['models']
+                            if models is None:
+                                cache_started = time.perf_counter()
+                                models = prepare_audit_models(job['assets'], resources.state_root()/'model_cache')
+                                connection.send(dict(model_cache=dict(preflight_s=time.perf_counter()-cache_started,
+                                                                      models=models)))
+                            model_started = time.perf_counter()
+                            enable_audit_models(models)
+                            resident_models = models
+                            model_s = time.perf_counter()-model_started
+                        write(folder.parent/'model_load.json',dict(base_mjb_s=model_s, reused_in_worker=reused_model))
+                        from .v8.audit import set_geometry_timing_path
+                        set_geometry_timing_path(folder.parent/'geometry_timings.jsonl')
+                        if job['source']=='smplx' and not job.get('checkpoint'):
+                            phase('preprocessing')
+                        convert(argparse.Namespace(**arguments(job,str(folder))))
+                    except Exception as error:
+                        traceback.print_exc()
+                        connection.send(dict(result='failed',error=repr(error)))
+                        return
+            if reusable:
+                release_memory()
+            connection.send(dict(result='returned'))
+            if not reusable:
+                break
+            assignment = connection.recv()
+            if assignment is None:
+                break
+            job, folder = assignment
+    except (EOFError, BrokenPipeError):
+        pass
+    finally:
+        connection.close()
 
 
 def tree_pids(pid):
@@ -302,6 +340,27 @@ def reply_workspace(worker, cpus):
     return True
 
 
+def wait_reason(request, compiler_owner):
+    if request is None:
+        return None
+    if compiler_owner is not None and request['phase']=='waiting_compile' and request.get('compile_possible'):
+        return 'compiler'
+    return 'memory'
+
+
+def close_idle(worker):
+    try:
+        worker['pipe'].send(None)
+    except (BrokenPipeError, EOFError, OSError):
+        pass
+    close(worker)
+
+
+def cold_start_due(pending, active, now, last_dispatch, warmup_s):
+    """With one wave of work left, give an existing process time to become ready."""
+    return active == 0 or pending > active or now - last_dispatch >= warmup_s
+
+
 def run(args):
     from .paths import asset_fingerprints
 
@@ -317,6 +376,9 @@ def run(args):
         if limit is not None and limit < BASE+GIB:
             raise ValueError('Cgroup limit cannot supply a worker and the 1 GiB startup reserve')
         spec = dict(schema=1, manifest_sha256=sha256(content).hexdigest(), options=options)
+        if args.mode == 'fast':
+            # Refine A batches written before mode selection keep the same manifest contract.
+            spec['mode'] = 'fast'
         if args.resume:
             if read(root/'pool_batch.json') != spec:
                 raise ValueError('Resume requires the original manifest and conversion options')
@@ -337,6 +399,7 @@ def schedule(jobs, root, ramp, workers, initial_memory, watermarks=(DANGER, RECO
     cpu_admission = CpuAdmission((cpu for core in cpu_groups for cpu in core), resources.cpu_count())
     completed = {}
     active = {}
+    idle = {}
     pending = deque()
     events = Counter()
     retry_count = Counter()
@@ -354,16 +417,26 @@ def schedule(jobs, root, ramp, workers, initial_memory, watermarks=(DANGER, RECO
         with (root/'memory_events.jsonl').open('a') as stream:
             stream.write(json.dumps(dict(time=time.time(),event=kind,**data))+'\n')
 
+    def retire_idle(cpu, reason):
+        w = idle.pop(cpu)
+        close_idle(w)
+        event('idle_reclaim',cpu=cpu,reason=reason,resident_bytes=w['lease'].resident)
+
     def status(state, snapshot):
         unused = sum(w['lease'].unused for w in active.values())
         write(root/'status.json',dict(state=state,updated_at=time.time(),pending=[j['key'] for j in pending],
               running={key:dict(pid=w['process'].pid,phase=w['phase'],loan_bytes=max(0,w['lease'].grant-BASE),
                                 cpu=w['lease'].cpu, borrowed_cpus=w['lease'].borrowed_cpus,
+                                grant_bytes=w['lease'].grant, unused_bytes=w['lease'].unused,
                                 resident_bytes=w['lease'].resident, max_resident_bytes=w['max_resident'],
-                                waiting=w['request'] is not None,folder=str(w['folder']),
+                                waiting=w['request'] is not None,wait_reason=wait_reason(w['request'], compiler_owner),
+                                folder=str(w['folder']),
                                 checkpoint=w['job'].get('checkpoint')) for key,w in active.items()},
+              idle={w['process'].pid:dict(cpu=cpu,resident_bytes=w['lease'].resident) for cpu,w in idle.items()},
               complete=completed,counts=dict(Counter(v['status'] for v in completed.values())),
               memory=snapshot,pool=dict(base_bytes=BASE,unused_bytes=unused,frozen=pool.frozen,
+                                        initial_host_available_bytes=initial_memory['available'],
+                                        initial_host_budget_bytes=max(0, initial_memory['available']-pool.start),
                                         exclusive_worker=exclusive,
                                         watermarks_gib=dict(danger=pool.danger/GIB, recover=pool.recover/GIB,
                                                             startup=pool.start/GIB),
@@ -391,6 +464,8 @@ def schedule(jobs, root, ramp, workers, initial_memory, watermarks=(DANGER, RECO
     grant_frozen = False
     last_pressure_sample = 0.
     next_start = 0.
+    last_dispatch = float('-inf')
+    cold_warmups = {}
     previous_write = 0.
     all_wait_since = None
     exclusive = None
@@ -411,10 +486,21 @@ def schedule(jobs, root, ramp, workers, initial_memory, watermarks=(DANGER, RECO
                     if 'request' in msg:
                         w['request'] = msg['request']
                         w['phase'] = w['request']['phase']
+                        if w['cold_start'] is not None and w['phase'] == 'ik_block':
+                            seconds = now - w['cold_start']
+                            cold_warmups.setdefault(w['job'].get('source'), deque(maxlen=5)).append(seconds)
+                            event('cold_ik_ready', key=key, seconds=seconds)
+                            w['cold_start'] = None
                         if compiler_owner == key and w['phase'] != 'waiting_compile':
                             compiler_owner = None
                         w['lease'].resident = max(w['request']['pss_bytes'],tree_pss(w['process'].pid))
-                        returned = w['lease'].return_unused()
+                        lease = w['lease']
+                        floor = BASE
+                        if w['job'].get('profile') == 'fast' and lease.resident > 0:
+                            # Already admitted loading credit belongs to this job. At
+                            # later safe boundaries the paused worker can release it.
+                            floor = lease.grant if w['phase'] == 'loading' else 0
+                        returned = lease.return_unused(floor)
                         if returned:
                             event('return_unused',key=key,phase=w['phase'],bytes=returned)
                         w['wait_started'] = now
@@ -438,13 +524,22 @@ def schedule(jobs, root, ramp, workers, initial_memory, watermarks=(DANGER, RECO
                 if result is not None or not w['process'].is_alive():
                     code = w['process'].exitcode
                     loan = max(0,w['lease'].grant-BASE)
-                    close(w)
                     del active[key]
                     if compiler_owner == key:
                         compiler_owner = None
                     if exclusive == key:
                         exclusive = None
                     q = publications(w['folder'],w['job'])
+                    reusable = (w['job'].get('profile')=='fast' and (result or {}).get('result')=='returned'
+                                and q is not None and not w['lease'].borrowed_cpus and w['process'].is_alive())
+                    if reusable:
+                        cpu = w['lease'].cpu
+                        # Idle resident pages are already charged in host and cgroup usage.
+                        w['lease'] = Lease(grant=0,resident=tree_pss(w['process'].pid),cpu=cpu)
+                        w['idle_since'] = now
+                        idle[cpu] = w
+                    else:
+                        close(w)
                     if q is None and code == -signal.SIGKILL and not stopped:
                         observed_oom = resources.memory().get('cgroup_oom_kills',0)
                         if observed_oom > oom_count or pressure_high():
@@ -463,13 +558,18 @@ def schedule(jobs, root, ramp, workers, initial_memory, watermarks=(DANGER, RECO
                         error = (result or {}).get('error') or f'Worker exited with code {code}'
                         q = dict(status='failed',folder=str(w['folder']),error=error)
                     completed[key] = dict(q, resumed_from=w['job'].get('checkpoint'))
-                    event('worker_exit',key=key,status=q['status'],base_bytes=BASE,loan_bytes=loan,
+                    event('worker_idle' if reusable else 'worker_exit',key=key,status=q['status'],base_bytes=BASE,loan_bytes=loan,
                           cpu=w['lease'].cpu, borrowed_cpus=w['lease'].borrowed_cpus)
                 else:
                     live = tree_pss(w['process'].pid)
                     w['lease'].resident = max(live, (w['request'] or {}).get('pss_bytes', 0))
                     w['max_resident'] = max(w['max_resident'],w['lease'].resident)
 
+            for cpu,w in list(idle.items()):
+                if not pending or not w['process'].is_alive():
+                    retire_idle(cpu,'queue_drained' if not pending else 'worker_exited')
+                else:
+                    w['lease'].resident = tree_pss(w['process'].pid)
             snapshot = resources.memory()
             cpu_limit = cpu_admission.sample(pid for w in active.values() for pid in tree_pids(w['process'].pid))
             min_available = min(min_available,snapshot['available'])
@@ -490,7 +590,9 @@ def schedule(jobs, root, ramp, workers, initial_memory, watermarks=(DANGER, RECO
                 if compiling and compiler_owner is not None:
                     continue
                 lease = w['lease']
-                required = requested_total(request,w['job']['frames'])
+                job = w['job']
+                required = requested_total(request, job['frames'], profile=job.get('profile', 'refine'),
+                                           warm=w['warm'], source=job.get('source'), resident=lease.resident)
                 added = max(0,required-lease.grant)
                 amount = max(0,required-max(lease.grant,lease.resident))
                 if amount and not pool.allows(snapshot,leases,amount):
@@ -508,6 +610,11 @@ def schedule(jobs, root, ramp, workers, initial_memory, watermarks=(DANGER, RECO
                     event('grant',key=key,phase=w['phase'],bytes=amount,after_host_bytes=after)
 
             blocked = [w for w in active.values() if w['request'] is not None]
+            waiting_for_memory = any(wait_reason(w['request'], compiler_owner)=='memory' for w in blocked)
+            if idle and (pool.frozen or waiting_for_memory):
+                cpu = max(idle,key=lambda cpu:idle[cpu]['lease'].resident)
+                retire_idle(cpu,'memory_pressure')
+                continue  # Re-measure the freed pages before making another grant.
             if blocked and len(active) == len(blocked) and len(active)>1:
                 all_wait_since = all_wait_since or now
                 if now-all_wait_since >= 12:
@@ -531,32 +638,70 @@ def schedule(jobs, root, ramp, workers, initial_memory, watermarks=(DANGER, RECO
                 all_wait_since=None
 
             cache_pending = models is None and active
-            can_start = (pending and not exclusive and not blocked and not cache_pending
-                         and len(active)<workers and now>=next_start)
-            cpu = pool.startup_cpu(snapshot,leases,cpu_limit) if can_start else None
+            can_start = pending and not exclusive and not waiting_for_memory and not cache_pending and len(active)<workers
+            free_cpus = pool.free_cpus(leases,cpu_limit) if can_start else []
+            warm_cpu = None
+            startup_grant = BASE
+            if free_cpus and idle:
+                # cpu_limit caps the count, not the IDs on which existing processes
+                # may run. A hot worker can be bound to any unoccupied eligible CPU.
+                for candidate in pool.free_cpus(leases, sum(map(len, cpu_groups))):
+                    if candidate not in idle:
+                        continue
+                    resident = idle[candidate]['lease'].resident
+                    hot_grant = fast_warm_grant(resident, pending[0]['frames'])
+                    if pool.allows(snapshot, leases, max(0, hot_grant-resident), start=True):
+                        warm_cpu, startup_grant = candidate, hot_grant
+                        break
+            cpu = warm_cpu
+            if cpu is None and free_cpus and now>=next_start:
+                timings = cold_warmups.get(pending[0].get('source')) if pending[0].get('profile') == 'fast' else None
+                warmup_s = min(median(timings), IDLE_TIMEOUT_SECONDS) if timings else 0.
+                if (cold_start_due(len(pending), len(active), now, last_dispatch, warmup_s)
+                        and pool.allows(snapshot,leases,BASE,start=True)):
+                    cpu = next((candidate for candidate in free_cpus if candidate not in idle),None)
             if cpu is not None:
                 job=pending[0]
                 key=job['key']
                 folder=root/key/f'attempt_{time.time_ns()}'/'frax'
                 folder.parent.mkdir(parents=True)
-                connection,endpoint=ctx.Pipe()
-                process=ctx.Process(target=worker,args=(endpoint,dict(job,models=models),folder,cpu))
-                try:
-                    process.start()
-                except BaseException:
-                    connection.close()
-                    raise
-                finally:
-                    endpoint.close()
+                resident = 0
+                if warm_cpu is not None:
+                    w = idle[cpu]
+                    process, connection = w['process'], w['pipe']
+                    try:
+                        connection.send((job,folder))
+                    except (BrokenPipeError, EOFError, OSError):
+                        retire_idle(cpu,'worker_exited')
+                        continue
+                    resident = idle.pop(cpu)['lease'].resident
+                else:
+                    connection,endpoint=ctx.Pipe()
+                    process=ctx.Process(target=worker,args=(endpoint,dict(job,models=models),folder,cpu))
+                    try:
+                        process.start()
+                    except BaseException:
+                        connection.close()
+                        raise
+                    finally:
+                        endpoint.close()
+                    next_start=now+ramp
                 pending.popleft()
-                lease = Lease(cpu=cpu)
+                last_dispatch = now
+                lease = Lease(cpu=cpu,resident=resident,grant=startup_grant)
                 active[key]=dict(job=job,folder=folder,process=process,pipe=connection,
-                                 phase='starting',lease=lease,request=None,max_resident=0,
+                                 phase='starting',lease=lease,request=None,max_resident=resident,warm=warm_cpu is not None,
+                                 cold_start=now if warm_cpu is None and job.get('profile')=='fast' else None,
                                  workspace_request=None)
                 leases.append(lease)
                 max_active=max(max_active,len(active))
-                next_start=now+ramp
-                event('worker_start',key=key,cpu=cpu,base_bytes=BASE,pid=process.pid,checkpoint=job.get('checkpoint'))
+                event('worker_reuse' if warm_cpu is not None else 'worker_start',
+                      key=key,cpu=cpu,base_bytes=startup_grant,pid=process.pid,
+                      compiler_waiters=len(blocked),checkpoint=job.get('checkpoint'))
+
+            for idle_cpu, w in list(idle.items()):
+                if now - w['idle_since'] >= IDLE_TIMEOUT_SECONDS:
+                    retire_idle(idle_cpu, 'idle_timeout')
 
             for key, w in active.items():
                 request = w['workspace_request']
@@ -577,6 +722,8 @@ def schedule(jobs, root, ramp, workers, initial_memory, watermarks=(DANGER, RECO
                 time.sleep(.45)
         state = 'interrupted' if stopped else 'complete'
     finally:
+        for cpu in list(idle):
+            retire_idle(cpu,'batch_finished')
         for key, w in list(active.items()):
             close(w)
             del active[key]
@@ -593,31 +740,40 @@ def main():
     from .contract import DEFAULT_FOOT_CONTACT
     from .smplx_cli import add_options
 
-    parser = argparse.ArgumentParser(description='Run Refine A batches with a shared CPU and memory pool')
+    parser = argparse.ArgumentParser(description='Run Fast or Refine A batches with a shared CPU and memory pool')
     parser.add_argument('manifest', type=Path)
     parser.add_argument('output', type=Path)
+    parser.add_argument('--mode', choices=('fast', 'refine'), default='refine')
     parser.add_argument('--workers', default='auto', help='Maximum workers; memory admission may use fewer')
     parser.add_argument('--ramp', type=float, default=2., help='Minimum seconds between new workers')
     parser.add_argument('--audit-workers', type=int, choices=(1, 2), default=1,
                         help='Use one CPU or request a second CPU for full-trajectory geometry audits')
     parser.add_argument('--memory-watermarks', type=float, nargs=3, metavar=('DANGER', 'RECOVER', 'START'),
-                        default=(DANGER/GIB, RECOVER/GIB, START/GIB), help='Host memory reserves in GiB (default: 8 10 12)')
+                        help='Host memory reserves in GiB (Fast: 2 each; Refine: 8 10 12)')
     parser.add_argument('--resume', action='store_true', help='Verify previous exports and resume from available checkpoints')
     parser.add_argument('--bvh-units', choices=['cm','m','mm'], default='cm')
     parser.add_argument('--bvh-translations', choices=['absolute','offset'], default='absolute')
     parser.add_argument('--foot-contact', choices=['v1','v2'], default=DEFAULT_FOOT_CONTACT)
     parser.add_argument('--iterations', type=int, default=8)
     parser.add_argument('--initial-iterations', type=int, default=100)
-    parser.add_argument('--allow-local-slowdown', action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument('--allow-local-slowdown', action=argparse.BooleanOptionalAction, default=None)
     add_repair_budget_option(parser)
     add_options(parser)
     args = parser.parse_args()
     args.manifest = args.manifest.resolve()
+    if args.allow_local_slowdown is None:
+        args.allow_local_slowdown = args.mode == 'refine'
+    if args.mode == 'fast' and (args.allow_local_slowdown or args.repair_budget is not None):
+        parser.error('--allow-local-slowdown and --repair-budget require --mode refine')
     if not math.isfinite(args.ramp) or args.ramp<=0 or min(args.iterations,args.initial_iterations)<1:
         parser.error('Worker start interval and iteration counts must be positive')
-    danger, recover, start = args.memory_watermarks
-    if not 0 < danger < recover < start < math.inf:
-        parser.error('Memory watermarks must be finite, positive and strictly increasing')
+    if args.memory_watermarks is None:
+        args.memory_watermarks = ((FAST_HOST_RESERVE_GIB,)*3 if args.mode == 'fast'
+                                  else (DANGER/GIB, RECOVER/GIB, START/GIB))
+    else:
+        danger, recover, start = args.memory_watermarks
+        if not 0 < danger < recover < start < math.inf:
+            parser.error('Memory watermarks must be finite, positive and strictly increasing')
     if args.input_fps is not None and (not math.isfinite(args.input_fps) or args.input_fps <= 0):
         parser.error('SMPL-X input fps must be finite and positive')
     try:

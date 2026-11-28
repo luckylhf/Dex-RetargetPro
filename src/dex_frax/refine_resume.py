@@ -52,8 +52,10 @@ _POOL_PREVIOUS = {
     'resources.py': ('3762a57e75f4835978173577d1d94e37138e47161c481ac4400a4f6fdc4b9d97',
                      'e2912af478519bbb53fe4936f5b0b1285ab2932d0cc4e29696aba5c280f7edd5'),
     'memory_pool.py': (None, 'a7eb8c33c2cbdeff754be5ea3126ef90ea268545e0689a9df8c1fb672d2bb11d',
+                       'dc448f12861369e0f408c9b0e213c59ec7e7a72c6642ce4d869cb8e568db1989',
                        'bfdd384f44ece8750cccae97c19e65cf1a8ecf207f52e6421c1295a4260a9ffc'),
     'memory_pool_batch.py': (
+        'db4c9ca5bb4bd2388cea7e5d1779f62727e1b448772fc62ea0e1480bdea40ca2',
         None, '878aee12f1f8a25cfe1871424e2530c1f323cf9a138f2477bf0f8d78ef487d2f',
         '42a56eecb7320ed13f441371a5b899dca5302e18c8e9d4f6eb862ce771c4c39d',
         '095b78cf0ffdf5c4297c9a70e21bbce73b9aa318c90c4467dcccd80dc962d7e1',
@@ -63,6 +65,7 @@ _POOL_PREVIOUS = {
         '698a3b6c3e020cd65b0305a3f135713803591f87e39c55424424f7d54e7fb6d5',
         '70e5c53c8ddf6ee7c18e649fca911008ada847ea2357351594e665305ffb2c95',
         '4b2870da824464da3d979fa914a29cb0ffbec27f06b73218b8c92322a211b8c7',
+        '3fddfba6355ddae9201b7497951e4713f810f83f8eb05170cc8703b56d3a3248',
     ),
     'pipeline_explain.py': ('13a2e626a09a58a06021b45d34641e9b721805785e9d8768f9df5ceeb86d4f97',),
     'retarget_batch.py': ('369feb1af8b201bed6a2f4488a3060d38d189a1dc2f6bb461efba28bdbbd1307',),
@@ -73,6 +76,7 @@ _POOL_PREVIOUS = {
     'v8/convert.py': ('2ebeb99eeb5c358956f2df36f0b0c40f4b9f8ab0c01df92a904b7f2e737223b1',
                       '3074eabe4decb905c71bb55549376cce96cb99df1cf7d565131ed2d4f8b78207'),
     'refine_resume.py': (
+        '576f3356925865410196dcf63a44443d735b4dac696965a13db3400c34818e40',
         '0d8c397c765119170b6f645c819e493f65d30013db6b6e025fedeb667c6a5c00',
         '30fdf08907f97bd772a027361a0a346ee78eaf52033174e608a7c7d348cb6d70',
         'afd9c0cfec5d23b92bc267d1cf5dc3c2f0ec74e1ce7fd73cbc351c0642ef02be',
@@ -88,6 +92,7 @@ _POOL_PREVIOUS = {
         'cd1072a611d348b6d4d082a3cfbbdc6f5ad310e4a3ea547f934fb7b9a8ccd455',
         '634f75d49fbaa93ed99fcad4338553896c086ee22815e3f7fcb49c5b83127c6f',
         '0e7914dc2db9e958a89488260960575954574636057b1f417a243781df046bef',
+        'a3cf66927dfc356d481733008d5e439fef07b538de97b41ac4850bb984281106',
     ),
     'refine_pipeline.py': (
         '4c18c7778d1191dc58920a7381194ead411f03493d3ad69f5e04b1076f7213f2',

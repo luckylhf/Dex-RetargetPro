@@ -6,6 +6,7 @@ from .resources import GIB, MIB
 
 BASE = 2816 * MIB
 DANGER, RECOVER, START = 8 * GIB, 10 * GIB, 12 * GIB
+FRAME_WORKSPACE = 32 * 1024
 
 
 @dataclass
@@ -20,9 +21,9 @@ class Lease:
     def unused(self):
         return max(0, self.grant - self.resident)
 
-    def return_unused(self):
+    def return_unused(self, floor=BASE):
         before = self.grant
-        self.grant = min(before, max(BASE, self.resident))
+        self.grant = min(before, max(floor, self.resident))
         return before - self.grant
 
     def borrow(self, cpus, workspace_bytes):
@@ -121,18 +122,51 @@ def operator_workspace(cores, workspace_bytes):
             gate()
 
 
-def requested_total(event, frames):
-    resident = event['pss_bytes']
+def fast_warm_grant(resident, frames):
+    """Total permit for an already loaded Fast process to begin its next input."""
+    if resident <= 0:
+        return BASE
+    # Reuse the initial scheduler's allowance for parsing and target buffers.
+    # The cached models and runtime are already resident.
+    return resident + 256 * MIB + frames * FRAME_WORKSPACE
+
+
+def requested_total(event, frames, *, profile='refine', warm=False, source=None, resident=None):
+    reported = event['pss_bytes']
+    resident = max(reported, resident or 0) if profile == 'fast' else reported
     if event.get('required_peak_bytes') is not None:
-        return max(BASE, event['required_peak_bytes'])
+        if profile != 'fast':
+            return max(BASE, event['required_peak_bytes'])
+        # The worker reports its own PSS plus the block's XLA workspace and
+        # result buffers. Preserve that increment if a child adds resident pages.
+        required = resident + max(0, event['required_peak_bytes'] - reported)
+        if resident > 0 and not event.get('first_block'):
+            return required
+        return max(BASE, required)
     phase = event['phase']
     if phase == 'loading':
+        if profile == 'fast' and warm:
+            return fast_warm_grant(resident, frames)
         return BASE
     if phase == 'waiting_compile' and event.get('compile_possible'):
         return max(BASE, 3840 * MIB, resident + 512 * MIB)
+    if profile == 'fast':
+        total = fast_warm_grant(resident, frames)
+        if phase == 'preprocessing' and source == 'smplx':
+            # The external SMPL-X preparation process runs before the next gate.
+            return max(BASE, total)
+        if phase in ('preprocessing', 'initial', 'waiting_compile', 'export'):
+            return total
+        # Full-geometry passes also construct native collision and floor state.
+        # Reserve an additional 256 MiB of working space for these phases.
+        total += 256 * MIB
+        if phase in ('fast_refinement', 'local_repair', 'audit', 'export_check'):
+            return total
+        # A new or opaque stage keeps at least the original conservative floor.
+        return max(BASE, total)
     # These checkpoints precede native calls with no workspace query. The
     # allowance is for the upcoming phase, and is dropped at the next gate.
     workspace = 96 * MIB
     if phase in ('preprocessing', 'initial', 'export_check', 'local_repair', 'audit'):
-        workspace += frames * 32 * 1024
+        workspace += frames * FRAME_WORKSPACE
     return max(BASE, resident + workspace)

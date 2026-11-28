@@ -56,9 +56,197 @@ def test_shared_pool_uses_distinct_restart_and_startup_watermarks():
     assert not pool.allows(snapshot, [], 0)
 
 
+@pytest.mark.parametrize(('mode','watermarks'), [
+    ('fast', (2., 2., 2.)),
+    ('refine', (8., 10., 12.)),
+])
+def test_pool_cli_applies_mode_memory_defaults(monkeypatch, mode, watermarks):
+    monkeypatch.setattr(memory_pool_batch.sys, 'argv',
+                        ['dex-frax-pool', 'manifest.json', 'outputs', '--mode', mode])
+    run = Mock(return_value=('complete', {}))
+    monkeypatch.setattr(memory_pool_batch, 'run', run)
+    memory_pool_batch.main()
+    assert run.call_args.args[0].memory_watermarks == watermarks
+
+
+def test_compiler_queue_and_memory_wait_are_distinct():
+    request = dict(phase='waiting_compile', compile_possible=True)
+    assert memory_pool_batch.wait_reason(request, 'owner') == 'compiler'
+    assert memory_pool_batch.wait_reason(request, None) == 'memory'
+    assert memory_pool_batch.wait_reason(dict(request, compile_possible=False), 'owner') == 'memory'
+    assert memory_pool_batch.wait_reason(dict(phase='audit'), 'owner') == 'memory'
+    assert memory_pool_batch.wait_reason(None, 'owner') is None
+
+
+def test_fast_tail_waits_at_most_one_observed_cold_start_for_a_warm_worker():
+    due = memory_pool_batch.cold_start_due
+    # A short queue can wait for a warm worker. The grace period after the
+    # most recent dispatch (cold or reused) ends exactly at the measured cost.
+    assert not due(pending=2, active=2, now=103., last_dispatch=100., warmup_s=4.)
+    assert due(pending=2, active=2, now=104., last_dispatch=100., warmup_s=4.)
+    # Never delay a cold start when capacity would otherwise sit unused
+    # behind a deep queue, no worker remains, or we have no warmup sample.
+    assert due(pending=3, active=2, now=100., last_dispatch=100., warmup_s=4.)
+    assert due(pending=1, active=0, now=100., last_dispatch=100., warmup_s=4.)
+    assert due(pending=1, active=2, now=100., last_dispatch=100., warmup_s=0.)
+
+
+@pytest.fixture
+def simulated_fast_pool(monkeypatch, tmp_path):
+    batch = memory_pool_batch
+    clock = 0
+    processes = {}
+
+    def make_pipe():
+        inbox = deque()
+        slot = SimpleNamespace(poll=lambda: bool(inbox), recv=inbox.popleft, close=lambda: None)
+        slot.inbox = inbox
+        return slot, slot
+
+    def make_process(target, args):
+        pipe, job, _, cpu = args
+        process = SimpleNamespace(pid=len(processes)+100, exitcode=None, close=lambda: None, join=lambda _: None)
+        process.is_alive = lambda: process.exitcode is None
+        process.job = job
+        process.age = 0
+        process.start = lambda: processes.update({process.pid: (process, pipe)})
+
+        def send(message):
+            if message is None:
+                process.exitcode = 0
+            elif message != 'grant':
+                process.job, _ = message
+                process.age = 0
+
+        pipe.send = send
+        return process
+
+    monkeypatch.setattr(batch, 'mp', SimpleNamespace(get_context=lambda _: SimpleNamespace(
+        Process=make_process, Pipe=make_pipe)))
+    monkeypatch.setattr(batch, 'pressure_high', lambda: False)
+    monkeypatch.setattr(batch, 'publications', lambda folder, job: dict(status='review'))
+
+    def run(available, advance, *, cpus=1, resident=2*GIB, cpu_limit=None, keys=('a', 'b')):
+        def tick(*args, **kwargs):
+            nonlocal clock
+            clock += 1
+            assert clock < 18, 'simulated batch stalled'
+            for process, pipe in processes.values():
+                if process.is_alive() and process.job is not None:
+                    process.age += 1
+                    if process.age == 1:
+                        pipe.inbox.append(dict(model_cache=dict(models={'verified': 'mjbs'})))
+                    if advance(process, pipe.inbox):
+                        pipe.inbox.append(dict(result='returned'))
+                        process.job = None
+
+        def memory():
+            live = [p for p, _ in processes.values() if p.is_alive()]
+            room = available(clock, live)
+            return dict(total=16*GIB, available=room, cgroup_headroom=room)
+
+        monkeypatch.setattr(batch, 'time', SimpleNamespace(monotonic=lambda: clock, time_ns=lambda: clock,
+                                                          time=lambda: clock, sleep=tick))
+        monkeypatch.setattr(batch, 'wait', tick)
+        monkeypatch.setattr(batch.resources, 'memory', memory)
+        monkeypatch.setattr(batch.resources, 'cpu_count', lambda: cpus)
+        monkeypatch.setattr(batch.resources, 'cpu_groups', lambda: [[cpu] for cpu in range(cpus)])
+        monkeypatch.setattr(batch, 'tree_pss', lambda _: resident)
+        monkeypatch.setattr(batch, 'CpuAdmission', lambda *args: SimpleNamespace(
+            sample=lambda _: cpu_limit(clock) if cpu_limit else cpus, report=dict))
+        jobs = [dict(key=key, frames=50, profile='fast', source='bvh') for key in keys]
+        state, completed = batch.schedule(jobs, tmp_path, 1, cpus, memory(), (2*GIB,)*3)
+        assert state == 'complete'
+        assert {key: info['status'] for key, info in completed.items()} == dict.fromkeys(keys, 'review')
+        status = batch.read(tmp_path/'status.json')
+        assert status['idle'] == {} and status['pool']['unused_bytes'] == 0
+        events = [json.loads(line) for line in (tmp_path/'memory_events.jsonl').read_text().splitlines()]
+        return status, events
+
+    return run
+
+
+@pytest.mark.parametrize('condition', ['roomy', 'pressure', 'startup_tight'])
+def test_fast_worker_reused_or_reclaimed_on_pressure(simulated_fast_pool, condition):
+    def available(clock, live):
+        if live and live[0].job is None:
+            if condition == 'pressure':
+                return GIB
+            if condition == 'startup_tight' and clock < 4:
+                return 2*GIB + 64*MIB
+        return 8*GIB
+
+    status, events = simulated_fast_pool(available, lambda process, inbox: True)
+    pressure = condition == 'pressure'
+    assert status['counters']['worker_start'] == (2 if pressure else 1)
+    assert status['counters'].get('worker_reuse', 0) == (0 if pressure else 1)
+    reasons = [event['reason'] for event in events if event['event']=='idle_reclaim']
+    assert reasons==(['memory_pressure','queue_drained'] if pressure else ['queue_drained'])
+    if condition == 'startup_tight':
+        reuse, = [event for event in events if event['event'] == 'worker_reuse']
+        assert reuse['time'] >= 4
+
+
+def test_fast_releases_startup_credit_before_dispatching_another_file(simulated_fast_pool):
+    def advance(process, inbox):
+        if process.age == 1:
+            inbox.append(dict(request=dict(phase='ik_block', pss_bytes=GIB,
+                                           required_peak_bytes=GIB+128*MIB)))
+        return process.age == 4
+
+    # 7 GiB with 2 GiB protected supports one cold start. A second fits once
+    # the first reaches an IK block with a measured 128 MiB workspace.
+    status, events = simulated_fast_pool(lambda clock, live: 7*GIB - len(live)*GIB,
+                                         advance, cpus=2, resident=GIB)
+    assert status['max_running'] == 2
+    start_second, = [e for e in events if e['event'] == 'worker_start' and e['key'] == 'b']
+    finish_first, = [e for e in events if e['event'] == 'worker_idle' and e['key'] == 'a']
+    assert start_second['time'] < finish_first['time']
+
+
+def test_fast_reuses_an_eligible_warm_cpu_when_the_cpu_limit_drops(simulated_fast_pool):
+    def advance(process, inbox):
+        if process.job['key'] == 'a':
+            if process.age == 1:
+                return False
+            process.exitcode = 0  # a completed, but its worker is no longer reusable
+        return True
+
+    # Both first results arrive together. Only CPU 1 has a warm worker.
+    # A host CPU target of one still permits picking CPU 1 for the next job.
+    status, events = simulated_fast_pool(lambda clock, live: 16*GIB, advance,
+                                         cpus=2, cpu_limit=lambda tick: 2 if tick < 2 else 1,
+                                         keys=('a', 'b', 'c'))
+    assert status['counters']['worker_start'] == 2
+    assert [(e['key'], e['cpu']) for e in events if e['event'] == 'worker_reuse'] == [('c', 1)]
+
+
 def test_block_request_uses_reported_workspace():
     event = dict(pss_bytes=BASE, phase='ik_block', required_peak_bytes=BASE+55*MIB)
     assert requested_total(event, 16000) == BASE+55*MIB
+
+
+def test_fast_stage_requests_preserve_native_workspace_and_cold_start_protection():
+    event = dict(pss_bytes=GIB, phase='loading')
+    fast = dict(profile='fast', source='bvh')
+    assert requested_total(event, 50, **fast) == BASE
+    warm = requested_total(event, 50, warm=True, **fast)
+    assert GIB < warm < BASE
+    assert warm == memory_pool.fast_warm_grant(GIB, 50)
+
+    # The native block reports only its own PSS and workspace. Another
+    # 256 MiB already resident in children must be included in the total.
+    block = dict(event, phase='ik_block', required_peak_bytes=GIB+128*MIB)
+    assert requested_total(block, 50, resident=GIB+256*MIB, **fast) == GIB+384*MIB
+    assert requested_total(block, 50) == BASE
+    assert requested_total(dict(block, first_block=True), 50, **fast) >= BASE
+    assert requested_total(dict(event, phase='preprocessing'), 50, profile='fast', source='smplx') >= BASE
+    assert requested_total(dict(event, phase='unrecognized_operator'), 50, **fast) >= BASE
+    audit = dict(event, phase='audit')
+    assert requested_total(audit, 12000, **fast) > requested_total(audit, 50, **fast)
+    compiling = dict(event, phase='waiting_compile', compile_possible=True)
+    assert requested_total(compiling, 50, **fast) >= 3840*MIB
+    assert requested_total(compiling, 50, resident=5*GIB, **fast) >= 5*GIB+512*MIB
 
 
 def test_deadlock_recovery_releases_priority_after_the_head_receives_its_grant():
@@ -138,25 +326,38 @@ def test_macos_memory_snapshot_includes_operator_children(monkeypatch):
     assert memory_pool_batch.tree_pss(100) == 210*1024
 
 
-def test_pool_counts_completed_output_only_for_its_target_assets(tmp_path):
+@pytest.mark.parametrize(('profile', 'status', 'training'), [
+    ('refine', 'accepted', True),
+    ('fast', 'review', False),
+])
+def test_pool_counts_completed_output_for_its_profile_and_target_assets(tmp_path, profile, status, training):
     from dex_frax.robot_profile import MODEL_XML
 
     assets = {MODEL_XML: 'robot', 'foot_mesh': 'geometry'}
-    job = dict(input_sha256='source', assets=assets)
+    job = dict(input_sha256='source', assets=assets, profile=profile)
+    contract = dict(profile=profile)
+    if profile == 'refine':
+        contract['refine_flow'] = 'A'
     identity = dict(input_sha256='source', assets=assets, fingerprint='recorded',
-                    conversion_contract=dict(refine_flow='A'))
-    quality = dict(status='accepted', flags=[], frames=10, model_sha256='robot',
+                    conversion_contract=contract)
+    quality = dict(status=status, flags=[], frames=10, model_sha256='robot',
                    full_self_collision=dict(collision_samples=0))
     (tmp_path/'identity.json').write_text(json.dumps(identity))
-    files = {'quality.json': json.dumps(quality).encode(), 'motion.npz': b'motion', 'motion.pkl': b'poses',
-             'training.npz': b'training'}
+    files = {'quality.json': json.dumps(quality).encode(), 'motion.npz': b'motion', 'motion.pkl': b'poses'}
+    if training:
+        files['training.npz'] = b'training'
     for name, data in files.items():
         (tmp_path/name).write_bytes(data)
-    run = dict(status='complete', quality='accepted', fingerprint='recorded',
+    run = dict(status='complete', quality=status, fingerprint='recorded',
                files={name:hashlib.sha256(data).hexdigest() for name,data in files.items()})
     (tmp_path/'run.json').write_text(json.dumps(run))
-    assert memory_pool_batch.publications(tmp_path, job)['training']
+    assert memory_pool_batch.publications(tmp_path, job)['training'] is training
     assert memory_pool_batch.publications(tmp_path, dict(job, assets=dict(assets, foot_mesh='other'))) is None
+    other = 'fast' if profile == 'refine' else 'refine'
+    assert memory_pool_batch.publications(tmp_path, dict(job, profile=other)) is None
+    if not training:
+        (tmp_path/'training.npz').write_bytes(b'invalid training')
+        assert memory_pool_batch.publications(tmp_path, job) is None
 
 
 def test_operator_returns_loan_on_exception_and_uses_serial_without_a_gate(monkeypatch):

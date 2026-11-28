@@ -30,6 +30,8 @@ dex-frax convert /path/to/input.bvh outputs/bvh_refine \
 
 回放优先使用 `frax/motion.npz`。验收状态和未解决事项见 `frax/pipeline.md` 与 `frax/quality.json`。`review` 轨迹供预览和排查。`refine` 通过终验后另写 `frax/training.npz`。预览和续跑工具只应读取可信来源的机器人 PKL。 [输出与排查](docs/VALIDATION.md)
 
+批量预览可用 `dex-frax-pool manifest.json outputs/pool-fast --mode fast`，由共享池按可用 CPU 和内存自动派发。 [批处理与续跑](docs/BATCH.md#cpu-与内存共享池)
+
 ## 转换 SMPL-X
 
 如使用同一 Python 环境，在已安装转换器的环境中执行以下命令。权重按 SMPL-X 许可获取，并放在权重父目录的 `smplx/` 下。`--input-fps` 按源数据实际帧率填写。
