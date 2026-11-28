@@ -5,14 +5,33 @@ import numpy as np
 from .contract import LEGACY_CHECKPOINT_FLOW
 
 
-# Known transition: unchanged contact geometry bytes and deadline-only collision changes.
+# Exact transitions that keep the old reference and permit a fresh audit.
 _RECHECK_COMPATIBLE = {
+    'v8/audit.py': (
+        ('c8f536ba479076689032a36a3725fbd4e9befc059774443796e3ec7502439967',
+         '60c667b6ba0385df09f7477b681b50891668c1265d00e79b42982cc44fb167f4',
+         'b2de74cdd320dfb8da973702a9e846f4e5d6f38d570d81b69856f7f087ff0726',
+         'a035b9ff99d654147a4aae09268bda195f619c2ad4579254683a652ec67f0156'),
+        'c1107b9365a72b3867e003fada997d8d2578f0eb971685426b7dd6bd31e69ee1',
+    ),
+    'model_cache.py': (
+        ('2869ce9217952d3877e22c15877dbc49448c32dbbd86d0ff249236a34101cd7c',),
+        'bb8c9ef7e1d478bd2c501b13b31549ea5dda2b8f055b5ac3176566587f0820a9',
+    ),
+    'foot_collision.py': (
+        ('0508aa097e6a1e1ce3ea590cfff9da008ec4ae52b67a37cabe8102b5d457ceca',),
+        'cde88ffc13f25f416cad791e8d364701517192c3a0ff5feeb30c3162a1772470',
+    ),
+    'contact_routed_initial.py': (
+        ('05970390c54db70e60fa51065f25d1f896e00f0d7e1900ec32cebf4c86ee0699',),
+        '664e68c78d3c4c5d93ee5b6862a78c29c8cb40b0dc786ab93afc4e43cbf3dd22',
+    ),
     'v8/self_collision.py': (
-        '57767317a4d7a2cbfb887eba4d8f8b80f914ba62658d8f0b738fb89515bd1921',
+        ('57767317a4d7a2cbfb887eba4d8f8b80f914ba62658d8f0b738fb89515bd1921',),
         '22e6de2fd14171f2f2009fd26ef5d785323eb20d423e1b6bb25377dcab275b54',
     ),
     'v8/multicontact.py': (
-        '3ad383feee540d5e205aa00796204f144425dd27105313d57ae147a7f9f8f1c0',
+        ('3ad383feee540d5e205aa00796204f144425dd27105313d57ae147a7f9f8f1c0',),
         '0c2b18161959583104c3e9bd2dd0a47da1e4b42d8f4ba78154fc3f74b971fc8b',
     ),
 }
@@ -25,15 +44,43 @@ _POOL_PREVIOUS = {
     'cli.py': ('f61ab70fdd95493c72c08a871bf7562a83a366e7060f1bf051482045d5270551',
                'f1d8e909923cbdd3ba258093d3c1614184460c5273e7d31e20518bfe72151d9b'),
     'contract.py': ('09a4163c61b9ee232430a5f6516157f0838b7d6b90f972b19972a69a389871eb',),
+    # Landing-join recovery only affects inputs that previously failed before export.
+    'contact_routed_initial.py': ('05970390c54db70e60fa51065f25d1f896e00f0d7e1900ec32cebf4c86ee0699',),
     'managed_batch.py': ('2d8939296717d1379ed129899599371d8dddb7bf741fa3a05240e2e81deaf7eb',),
-    'resources.py': ('3762a57e75f4835978173577d1d94e37138e47161c481ac4400a4f6fdc4b9d97',),
-    'memory_pool.py': (None,),
-    'memory_pool_batch.py': (None, '878aee12f1f8a25cfe1871424e2530c1f323cf9a138f2477bf0f8d78ef487d2f'),
+    'model_cache.py': ('2869ce9217952d3877e22c15877dbc49448c32dbbd86d0ff249236a34101cd7c',),
+    'foot_collision.py': ('0508aa097e6a1e1ce3ea590cfff9da008ec4ae52b67a37cabe8102b5d457ceca',),
+    'resources.py': ('3762a57e75f4835978173577d1d94e37138e47161c481ac4400a4f6fdc4b9d97',
+                     'e2912af478519bbb53fe4936f5b0b1285ab2932d0cc4e29696aba5c280f7edd5'),
+    'memory_pool.py': (None, 'a7eb8c33c2cbdeff754be5ea3126ef90ea268545e0689a9df8c1fb672d2bb11d',
+                       'bfdd384f44ece8750cccae97c19e65cf1a8ecf207f52e6421c1295a4260a9ffc'),
+    'memory_pool_batch.py': (
+        None, '878aee12f1f8a25cfe1871424e2530c1f323cf9a138f2477bf0f8d78ef487d2f',
+        '42a56eecb7320ed13f441371a5b899dca5302e18c8e9d4f6eb862ce771c4c39d',
+        '095b78cf0ffdf5c4297c9a70e21bbce73b9aa318c90c4467dcccd80dc962d7e1',
+        'fb72199814dd5a0a47a22160b2f2bc841cab4707bdcb044095baaa581a9c962d',
+        'ebf45621e447a5f8ab78b482c26ba11af69f6a32623896f61ec782768826b062',
+        'fbb60d765463f75f13f00eedd8ebfe2114dbc2121e4fc8be62b3d9b727b10cc6',
+        '698a3b6c3e020cd65b0305a3f135713803591f87e39c55424424f7d54e7fb6d5',
+        '70e5c53c8ddf6ee7c18e649fca911008ada847ea2357351594e665305ffb2c95',
+        '4b2870da824464da3d979fa914a29cb0ffbec27f06b73218b8c92322a211b8c7',
+    ),
     'pipeline_explain.py': ('13a2e626a09a58a06021b45d34641e9b721805785e9d8768f9df5ceeb86d4f97',),
     'retarget_batch.py': ('369feb1af8b201bed6a2f4488a3060d38d189a1dc2f6bb461efba28bdbbd1307',),
+    'v8/audit.py': ('c8f536ba479076689032a36a3725fbd4e9befc059774443796e3ec7502439967',
+                    '60c667b6ba0385df09f7477b681b50891668c1265d00e79b42982cc44fb167f4',
+                    'b2de74cdd320dfb8da973702a9e846f4e5d6f38d570d81b69856f7f087ff0726',
+                    'a035b9ff99d654147a4aae09268bda195f619c2ad4579254683a652ec67f0156'),
     'v8/convert.py': ('2ebeb99eeb5c358956f2df36f0b0c40f4b9f8ab0c01df92a904b7f2e737223b1',
                       '3074eabe4decb905c71bb55549376cce96cb99df1cf7d565131ed2d4f8b78207'),
     'refine_resume.py': (
+        '0d8c397c765119170b6f645c819e493f65d30013db6b6e025fedeb667c6a5c00',
+        '30fdf08907f97bd772a027361a0a346ee78eaf52033174e608a7c7d348cb6d70',
+        'afd9c0cfec5d23b92bc267d1cf5dc3c2f0ec74e1ce7fd73cbc351c0642ef02be',
+        '4cb29c8c891b353c7ef39117c0314692a2d6da7a22873aa0dd7e22404d88b72e',
+        '4bba2c8d2906ec1504f7573bb89e026bbab04e8317daa02ebdaa1237159e97e6',
+        '07a3c74f45e0bbe80b628714582fdaefad5befb2c4b9325af922e6c8c6556a3b',
+        'e598123f64d1abc6aae62ba3260919c28899769b9a5e241ae2c3970651322023',
+        '9bbbe5718014c409051508d9caad8c3af74a337eb5e6161f87cc0158b1d775a5',
         '91e6145aefe48b84cecac9ee07ec46205e84bc10eb2363fd5e72ce602fecd6a5',
         'fe0d4056b2ab5d80362ac8f90e2d98c3780c3b44fb5c06c20c08138b3907f244',
         'fba61aa2e54f51cab52afecd08e0568df8cef5a8f9a34aebe88ebcdb3c622f4f',
@@ -57,6 +104,8 @@ _POOL_PREVIOUS = {
     'retiming.py': ('bb4b08b97612ec8734ceee8f5d535e6a752867022a2025802dbeb10ea6806332',),
 }
 _POOL_FIXED = {
+    **{name:_RECHECK_COMPATIBLE[name][1]
+       for name in ('v8/audit.py','model_cache.py','foot_collision.py','contact_routed_initial.py')},
     'refine_pipeline.py': '55c8998a08ccf19494f36632799fd9a360338616d8d2a23be42d12c611c68693',
     'retiming.py': 'b83626cf6db78716a47754377e5eedb76e3bcb5ee085dbc9b41c368171452de0',
 }
@@ -90,15 +139,16 @@ def verify(folder,identity,recheck=False):
     from .cli import sha
     old=json.loads((folder/'identity.json').read_text())
     if recheck:
-        initial={'scene_support.py','robot_profile.py','smplx_input.py','smplx_source.py','source_integrity.py','source_support.py','human_motion_constants.py','v8/bvh.py','foot_transition.py','contact_phase.py','phase_height.py','phase_path.py','ik.py','pelvis_priority.py','kinematics.py','shoulder_reference.py',
+        initial={'scene_support.py','robot_profile.py','smplx_input.py','smplx_source.py','source_integrity.py','source_support.py','human_motion_constants.py','v8/bvh.py','foot_transition.py','contact_phase.py','phase_height.py','phase_path.py','ik.py','pelvis_priority.py','kinematics.py','shoulder_reference.py','contact_routed_initial.py',
                  'frax_foot_constraints.py','frax_arm_constraints.py','airborne.py',
                  'v8/contacts.py','v8/multicontact.py','retiming.py'}
         safety={'acceptance.py','quality_pose.py','quality_v8.py','audit_cache.py','support_quality.py','temporal_quality.py','ankle_collision.py',
-                'v8/audit.py','v8/anatomy.py','v8/robot.py','v8/self_collision.py'}
+                'v8/audit.py','v8/anatomy.py','v8/robot.py','v8/self_collision.py','foot_collision.py','model_cache.py'}
         names=set(old['implementation'])|set(identity['implementation'])
         for name in names:
             before, after = old['implementation'].get(name), identity['implementation'].get(name)
-            if (before, after) == _RECHECK_COMPATIBLE.get(name):
+            previous, expected = _RECHECK_COMPATIBLE.get(name, ((), None))
+            if before in previous and after == expected:
                 continue
             defines_initial = name in initial or name.startswith(('full_chain', 'frax_')) and name.endswith('.py')
             if defines_initial and old['implementation'].get(name)!=identity['implementation'].get(name):

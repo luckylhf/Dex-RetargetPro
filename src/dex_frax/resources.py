@@ -48,8 +48,8 @@ def workers(value):
     if not 1<=n<=usable:raise ValueError(f'workers must be between 1 and {usable}')
     return n
 
-def cpu_order(allowed=None,sysfs=Path('/sys/devices/system/cpu')):
-    """Use every physical core before assigning its SMT sibling."""
+def cpu_groups(allowed=None,sysfs=Path('/sys/devices/system/cpu')):
+    """Group the allowed logical CPU IDs by physical core where available."""
     allowed=sorted(allowed if allowed is not None else (os.sched_getaffinity(0) if hasattr(os,'sched_getaffinity') else range(os.cpu_count() or 1)))
     groups={}
     for cpu in allowed:
@@ -58,7 +58,11 @@ def cpu_order(allowed=None,sysfs=Path('/sys/devices/system/cpu')):
             key=(int((root/'physical_package_id').read_text()),int((root/'core_id').read_text()))
         except (OSError,ValueError):key=(0,cpu)
         groups.setdefault(key,[]).append(cpu)
-    cores=list(groups.values())
+    return list(groups.values())
+
+def cpu_order(allowed=None,sysfs=Path('/sys/devices/system/cpu')):
+    """Use every physical core before assigning its SMT sibling."""
+    cores=cpu_groups(allowed,sysfs)
     return [core[i] for i in range(max(map(len,cores),default=0)) for core in cores if i<len(core)]
 
 def cgroup_ancestors():

@@ -94,19 +94,66 @@ def test_expansion_and_join_search_do_not_cross_flight():
     np.testing.assert_array_equal(result[flight], joins.legacy[flight])
 
 
-def test_unresolved_join_stops_at_flight_boundary():
+def test_unresolved_join_retains_contact_first_only_for_rejected_section():
     joins = SectionJoins.__new__(SectionJoins)
-    joins.targets = {'source_airborne': [True, False, False, False, False]}
-    joins.legacy = np.zeros((5, POSE_SIZE))
-    joins.landing = np.ones((5, POSE_SIZE))
-    joins.check_direct = lambda cut, entering: 'motor_speed'
+    flight = np.zeros(18, dtype=bool)
+    flight[[0,4,11]] = True
+    joins.targets = {'source_airborne': flight}
+    joins.legacy = np.zeros((18, POSE_SIZE))
+    joins.landing = np.ones((18, POSE_SIZE))
+    joins.check_direct = lambda cut, entering: 'motor_speed' if cut == 1 else None
 
     def fail_fit(*args):
         raise ValueError('insufficient_boundary_context')
 
     joins.fit = fail_fit
-    with pytest.raises(ValueError, match='frame 1 without changing source flight'):
-        joins.assemble(np.array([False, True, False, False, False]), 3)
+    required = np.zeros_like(flight)
+    required[[1,8]] = True
+    rows, active, attempts = joins.assemble(required, 2)
+
+    assert np.flatnonzero(active).tolist() == list(range(6,11))
+    np.testing.assert_array_equal(rows[~active], joins.legacy[~active])
+    np.testing.assert_array_equal(rows[active], joins.landing[active])
+    assert attempts[-1]['joins'][-1] == dict(section=[1,4],status='kept_contact_first',
+                                            reason='no_checked_cut_in_padding')
+    assert attempts[-1]['blocked_sections'][0]['joins'][0]['fit_reason'] == 'insufficient_boundary_context'
+
+
+@pytest.mark.parametrize('assembled_reason', [None,'contact_or_slip'])
+def test_inward_cut_is_checked_on_assembled_rows_and_retains_required_core(assembled_reason):
+    joins = SectionJoins.__new__(SectionJoins)
+    flight = np.zeros(10, dtype=bool)
+    flight[0] = True
+    joins.targets = {'source_airborne': flight}
+    joins.legacy = np.zeros((10, POSE_SIZE))
+    joins.landing = np.ones((10, POSE_SIZE))
+    joins.check_direct = lambda cut, entering: 'root_step' if cut == 1 else None
+
+    def fail_fit(*args):
+        raise ValueError('root_step')
+
+    def check(rows, start, end):
+        if start == 1:
+            np.testing.assert_array_equal(rows[start], joins.legacy[start])
+            np.testing.assert_array_equal(rows[end-1], joins.landing[end-1])
+            return assembled_reason
+        return None
+
+    joins.fit = fail_fit
+    joins.check = check
+    required = np.zeros_like(flight)
+    required[3] = True
+    rows, active, attempts = joins.assemble(required, 2)
+    last = attempts[-1]['joins'][-1]
+    if assembled_reason:
+        assert last['status'] == 'kept_contact_first'
+        assert last['reason'] == 'contact_or_slip'
+        assert not active.any()
+    else:
+        assert last['status'] == 'moved_inward'
+        assert last['remaining_section'] == [2,6]
+        assert active[3]
+    np.testing.assert_array_equal(rows[~active], joins.legacy[~active])
 
 
 def test_lift_correction_smooths_only_changed_unprotected_rows():

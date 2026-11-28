@@ -1,5 +1,6 @@
 from dex_frax.robot_profile import JOINT_COUNT
 import copy,json,pickle
+import os
 from pathlib import Path
 import numpy as np
 import pytest
@@ -43,6 +44,88 @@ def test_cached_audit_equals_fresh_including_boundary_intervals(tmp_path,bounds)
     assert not wrong['work']['cache_hit']
     dg['Left_upper'][:,0]+=.001;np.savez_compressed(p.with_suffix('.diagnostics.npz'),**dg)
     audit(p,cache=trial,changed=bounds);assert not trial['work']['cache_hit']
+
+
+def _collision_worker_with_receipt(cpu, path, configuration, rows, rotations, models=None):
+    from dex_frax.v8.audit import _collision_worker
+
+    report = _collision_worker(cpu, path, configuration, rows, rotations, models)
+    Path(configuration['test_receipt']).write_text(json.dumps(dict(pid=os.getpid(), cached=models is not None)))
+    return report
+
+
+def test_parallel_geometry_preserves_full_sweep_samples_and_incremental_cache(monkeypatch, tmp_path):
+    from scipy.spatial.transform import Rotation
+    from dex_frax import memory_pool, model_cache
+    from dex_frax.paths import asset_fingerprints
+    from dex_frax.robot_profile import PELVIS_BODY
+    from dex_frax.v8 import audit
+    from dex_frax.v8.robot import Robot
+
+    robot = Robot()
+    count = 98
+    rows = np.zeros((count, JOINT_COUNT+3))
+    rows[:, 2] = robot.neutral_pos[robot.bid(PELVIS_BODY)][2]
+    rows[48:51, 2] -= .5
+    rows[:, 3] = np.linspace(-.1, .1, count)
+    root_angles = np.zeros((count, 3))
+    root_angles[:, 2] = np.linspace(0, .1, count)
+    rotations = Rotation.from_rotvec(root_angles).as_matrix()
+    receipt = tmp_path/'helper.pid'
+    meta = dict(profile='refine', configuration={'test_receipt':str(receipt)})
+    serial_cache, parallel_cache = {}, {}
+    serial = audit.geometry_checks(robot, meta, rows, rotations, serial_cache, None, False)
+    models = model_cache.prepare_audit_models(asset_fingerprints(), tmp_path/'models')
+    assert not any(info['reused'] for info in models.values())
+    warm = model_cache.prepare_audit_models(asset_fingerprints(), tmp_path/'models')
+    assert all(info['reused'] and info['sha256']==models[name]['sha256'] for name,info in warm.items())
+    for name in ('_model','_xml','_audit_models'):
+        monkeypatch.setattr(model_cache, name, getattr(model_cache,name))
+    model_cache.enable_audit_models(warm)
+    cached_robot = Robot()
+    second_robot = Robot()
+    assert cached_robot.m is second_robot.m and cached_robot.d is not second_robot.d
+    cached = audit.geometry_checks(cached_robot, meta, rows, rotations, {}, None, False)
+    assert cached[:2] == serial[:2] and np.array_equal(cached[2], serial[2])
+
+    cpu = min(os.sched_getaffinity(0)) if hasattr(os, 'sched_getaffinity') else 0
+    calls = []
+
+    def gate(*args):
+        calls.append(args)
+        return (cpu,) if args else ()
+
+    monkeypatch.setattr(memory_pool, '_workspace_gate', gate)
+    monkeypatch.setattr(audit, '_collision_worker', _collision_worker_with_receipt)
+    timing = {}
+    parallel = audit.geometry_checks(cached_robot, meta, rows, rotations, parallel_cache, None, False, timing)
+    worker = json.loads(receipt.read_text())
+    assert worker['pid'] != os.getpid() and worker['cached']
+    assert timing['geometry_mode']=='parallel'
+    binary_bytes = sum(Path(info['binary']).stat().st_size for info in warm.values())
+    assert timing['workspace_bytes'] == 2*binary_bytes+256*memory_pool.MIB+count*64*1024
+    assert all(timing[key]>=0 for key in ('helper_startup_s','input_receive_s','helper_robot_s','collision_model_s',
+                                         'full_collision_scan_s','result_transfer_s','helper_shutdown_s','workspace_return_s'))
+    assert parallel[:2] == serial[:2]
+    assert np.array_equal(parallel[2], serial[2])
+    assert (parallel[2] < -.001).any()
+    for name in ('arm_collision', 'full_collision'):
+        assert parallel_cache[name]['samples'] == serial_cache[name]['samples']
+    assert len(calls) == 2 and calls[0][0] == 1 and calls[1] == ()
+
+    rows[48:51, 2] += .03
+    incremental = audit.geometry_checks(robot, meta, rows, rotations, parallel_cache, (48, 51), True)
+    assert len(calls) == 2
+    monkeypatch.setattr(memory_pool, '_workspace_gate', None)
+    fresh = audit.geometry_checks(robot, meta, rows, rotations, {}, None, False)
+    assert incremental[:2] == fresh[:2]
+    assert np.array_equal(incremental[2], fresh[2])
+
+    variant = Path(warm['collision']['binary'])
+    with variant.open('ab') as stream:
+        stream.write(b'invalid cache')
+    with pytest.raises(ValueError, match='Cached MJB hash mismatch'):
+        model_cache.prepare_audit_models(asset_fingerprints(), tmp_path/'models')
 
 
 def test_relocated_audit_uses_verified_runtime_assets(tmp_path):

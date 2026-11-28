@@ -1,6 +1,9 @@
 """Recompute export FK and report geometry, contact, anatomical and time errors."""
 import argparse,json,pickle
+import hashlib
+import logging
 from pathlib import Path
+import time
 from dex_frax.robot_profile import MODEL_XML
 import numpy as np
 from .. import robot_profile as target_profile
@@ -61,15 +64,144 @@ def audit_model_path(path, meta, payload):
     return candidate
 
 
+_geometry_timing_path = None
+_helper_started_at = None
+
+
+def set_geometry_timing_path(path):
+    global _geometry_timing_path
+    _geometry_timing_path = path
+
+
+def _mark_helper_started():
+    global _helper_started_at
+    _helper_started_at = time.perf_counter()
+
+
+def full_collision(robot, config, rows, rotations, cache, changed=None, timing=None):
+    from .self_collision import CollisionModel, scan
+
+    started = time.perf_counter()
+    model = CollisionModel(robot, dict(config or {}, coverage='full'))
+    ready = time.perf_counter()
+    report = scan(model, rows, rotations, 8, cache=cache, changed=changed)[0]
+    pair_names = sorted(sorted(pair) for pair in model.names)
+    report['pair_set_sha256'] = hashlib.sha256(json.dumps(pair_names, separators=(',', ':')).encode()).hexdigest()
+    if timing is not None:
+        timing['collision_model_s'] = ready-started
+        timing['full_collision_scan_s'] = time.perf_counter()-ready
+    return report
+
+
+def _collision_worker(cpu, model_path, configuration, rows, rotations, models=None):
+    import os
+
+    entered = time.perf_counter()
+    if hasattr(os, 'sched_setaffinity'):
+        os.sched_setaffinity(0, {cpu})
+    if models is not None:
+        from ..model_cache import enable_audit_models
+        enable_audit_models(models)
+    robot = Robot(model_path)
+    if 'anatomy' in configuration:
+        configure(robot, configuration['anatomy'])
+    cache = {}
+    timing = dict(helper_started_at=_helper_started_at or entered, entered_at=entered,
+                  helper_robot_s=time.perf_counter()-entered)
+    report = full_collision(robot, configuration.get('self_collision'), rows, rotations, cache, timing=timing)
+    timing['helper_scan_done_at'] = time.perf_counter()
+    return report, cache, timing
+
+
+def geometry_checks(robot, meta, rows, rotations, cache, changed, valid, timing=None):
+    from .self_collision import CollisionModel, scan
+    from ..audit_cache import dense_floor
+
+    configuration = meta['configuration']
+    collision_config = configuration.get('self_collision')
+    bounds = changed if valid else None
+    stats = {} if timing is None else timing
+    stats['geometry_mode'] = 'serial'
+
+    def arms():
+        started = time.perf_counter()
+        result = scan(CollisionModel(robot, collision_config), rows, rotations, 8,
+                      cache=cache.setdefault('arm_collision', {}), changed=bounds)[0]
+        stats['arm_collision_s'] = time.perf_counter()-started
+        return result
+
+    def floor():
+        started = time.perf_counter()
+        result = dense_floor(robot, rotations, rows, cache, changed, valid)
+        stats['floor_scan_s'] = time.perf_counter()-started
+        return result
+
+    # Incremental candidates usually touch small windows. Keep their validated
+    # cache local. Full sweeps can overlap using independent MuJoCo data.
+    if meta.get('profile') == 'refine' and not valid and len(rows) >= 96:
+        from concurrent.futures import ProcessPoolExecutor
+        from concurrent.futures.process import BrokenProcessPool
+        from multiprocessing import get_context
+        from ..memory_pool import MIB, operator_workspace
+        from ..model_cache import audit_models
+
+        models = audit_models()
+        model_bytes = sum(Path(info['binary']).stat().st_size for info in models.values()) if models else 0
+        # MJB loading may hold the serialized buffer and native model at once.
+        workspace = max(512*MIB, 2*model_bytes+256*MIB) + len(rows)*64*1024
+        requested_at = time.perf_counter()
+        outcome = None
+        with operator_workspace(1, workspace) as cpus:
+            stats['grant_wait_s'] = time.perf_counter()-requested_at
+            if cpus:
+                try:
+                    arrival = []
+                    dispatched_at = time.perf_counter()
+                    with ProcessPoolExecutor(1, mp_context=get_context('spawn'), initializer=_mark_helper_started) as executor:
+                        future = executor.submit(_collision_worker, cpus[0], robot.path, configuration, rows,
+                                                 rotations, models)
+                        future.add_done_callback(lambda _: arrival.append(time.perf_counter()))
+                        arm = arms()
+                        heights = floor()
+                        joining_at = time.perf_counter()
+                        full, full_cache, helper = future.result()
+                        joined_at = time.perf_counter()
+                except (OSError, BrokenProcessPool) as error:
+                    # The CPU/memory loan is returned after the helper exits.
+                    stats['geometry_mode'] = 'parallel_fallback'
+                    logging.getLogger(__name__).warning('Parallel geometry audit continued serially: %s', error)
+                else:
+                    returned_at = time.perf_counter()
+                    stats.update(geometry_mode='parallel', workspace_bytes=workspace,
+                                 helper_startup_s=helper['helper_started_at']-dispatched_at,
+                                 input_receive_s=helper['entered_at']-helper['helper_started_at'],
+                                 helper_robot_s=helper['helper_robot_s'], collision_model_s=helper['collision_model_s'],
+                                 full_collision_scan_s=helper['full_collision_scan_s'],
+                                 result_transfer_s=arrival[0]-helper['helper_scan_done_at'],
+                                 parent_wait_s=joined_at-joining_at, helper_shutdown_s=returned_at-joined_at)
+                    cache['full_collision'] = full_cache
+                    outcome = arm, full, heights
+        if outcome is not None:
+            stats['workspace_return_s'] = time.perf_counter()-returned_at
+            return outcome
+
+    arm = arms()
+    full = full_collision(robot, collision_config, rows, rotations, cache.setdefault('full_collision', {}), bounds, stats)
+    return arm, full, floor()
+
+
 def audit(path,write=True,cache=None,changed=None):
+    started = time.perf_counter()
     path=Path(path);data=pickle.loads(path.read_bytes());meta=json.loads(path.with_suffix('.json').read_text())
     with np.load(path.with_suffix('.diagnostics.npz'),allow_pickle=False) as archive:dg={k:archive[k] for k in archive.files}
+    robot_started = time.perf_counter()
     rob=Robot(audit_model_path(path,meta,data))
+    robot_setup_s = time.perf_counter()-robot_started
     if data['joint_names']!=rob.names or data['quat_order']!='xyzw':raise ValueError('Export contract mismatch')
     physical_lo=rob.lower.copy();physical_hi=rob.upper.copy()
     if 'anatomy' in meta['configuration']:configure(rob,meta['configuration']['anatomy'])
     q=data['dof_pos'].astype(float);n=len(q);rr=Rotation.from_quat(data['root_rot']).as_matrix();fps=data['fps']
-    from ..audit_cache import digest,valid_rows,remember,dense_floor as cached_floor
+    from ..audit_cache import digest,valid_rows,remember
     cache={} if cache is None else cache
     key=digest(meta,dg,rob.path)
     valid=valid_rows(cache,data,changed,key)
@@ -202,20 +334,13 @@ def audit(path,write=True,cache=None,changed=None):
         result['baseline_body_identical']={k:bool(np.array_equal(data[k],baseline[k])) for k in ('root_pos','root_rot')}
         result['baseline_body_identical']['non_arm_dof_pos']=bool(np.array_equal(data['dof_pos'][:,body_ids],baseline['dof_pos'][:,body_ids]))
         if not all(result['baseline_body_identical'].values()):raise AssertionError('Baseline body changed')
-    from .self_collision import audit_export
-    from .self_collision import CollisionModel,scan
-    arm_model=CollisionModel(rob,meta['configuration'].get('self_collision'))
-    result['self_collision']=scan(arm_model,np.c_[data['root_pos'],q],rr,8,cache=cache.setdefault('arm_collision',{}),changed=changed if valid else None)[0]
-    from .self_collision import CollisionModel,scan
-    full_model=CollisionModel(rob,dict(meta['configuration'].get('self_collision') or {},coverage='full'))
-    result['full_self_collision']=scan(full_model,np.c_[data['root_pos'],q],rr,8,cache=cache.setdefault('full_collision',{}),changed=changed if valid else None)[0]
-    import hashlib
-    pair_names=sorted(sorted(pair) for pair in full_model.names)
-    result['full_self_collision']['pair_set_sha256']=hashlib.sha256(json.dumps(pair_names,separators=(',',':')).encode()).hexdigest()
+    rows = np.c_[data['root_pos'], q]
+    timing = {} if _geometry_timing_path is not None and not valid else None
+    geometry_started = time.perf_counter()
+    result['self_collision'], result['full_self_collision'], dense_floor = geometry_checks(rob,meta,rows,rr,cache,changed,valid,timing)
+    geometry_s = time.perf_counter()-geometry_started
     delta=data['root_pos'].astype(float)-dg['root_target']
     result['root_translation_error_cm']=dict(xy=stats(np.linalg.norm(delta[:,:2],axis=1)*100),z=stats(abs(delta[:,2])*100),reference='scaled and grounded prepared human root target; height compensation included')
-    from ..torso_branch import floor_samples
-    dense_floor=cached_floor(rob,rr,np.c_[data['root_pos'],q],cache,changed,valid)
     result['interpolated_floor']={
         'interpolation_steps':8,'samples':len(dense_floor),
         'minimum_body_visual_cm':float(dense_floor.min()*100),
@@ -227,7 +352,6 @@ def audit(path,write=True,cache=None,changed=None):
     if meta.get('scene_support'):
         scene = meta['scene_support']
         from ..scene_support import audit_scene, audit_gravity
-        rows = np.c_[data['root_pos'],q]
         if scene['boxes']:
             result['scene_support']=audit_scene(rob,rows,rr,dg,scene['boxes'])
         if scene.get('gravity_inferred_platforms'):
@@ -247,6 +371,11 @@ def audit(path,write=True,cache=None,changed=None):
     if write:
         np.savez_compressed(path.with_suffix('.pose_errors.npz'),**{s+'_'+k:np.asarray(v) for s,d in errors.items() for k,v in d.items()})
         path.with_suffix('.check.json').write_text(json.dumps(result,ensure_ascii=False,indent=2))
+    if timing is not None:
+        timing.update(path=str(path), frames=n, main_robot_setup_s=robot_setup_s,
+                      geometry_wall_s=geometry_s, audit_wall_s=time.perf_counter()-started)
+        with _geometry_timing_path.open('a') as stream:
+            stream.write(json.dumps(timing)+'\n')
     return result
 
 if __name__=='__main__':

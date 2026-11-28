@@ -1,4 +1,4 @@
-"""Run a verified motion manifest with the Refine A shared memory pool."""
+"""Run a verified Refine A manifest with joint CPU and memory admission."""
 import argparse
 from collections import Counter, deque
 from hashlib import file_digest, sha256
@@ -9,11 +9,14 @@ from multiprocessing.connection import wait
 import os
 from pathlib import Path
 import signal
+import subprocess
+import sys
 import time
 import traceback
 
 from . import resources
-from .memory_pool import BASE, GIB, START, Lease, Pool, requested_total
+from .dynamic_resources import CpuAdmission
+from .memory_pool import BASE, DANGER, GIB, RECOVER, START, JointPool, Lease, requested_total, set_workspace_gate
 
 
 def read(path):
@@ -40,6 +43,8 @@ def arguments(job, output=None):
 
 
 def publications(folder, job):
+    from .robot_profile import MODEL_XML
+
     try:
         run = read(folder/'run.json')
         quality = read(folder/'quality.json')
@@ -48,6 +53,8 @@ def publications(folder, job):
             return None
         if (run['quality'] != quality['status'] or identity['input_sha256'] != job['input_sha256']
                 or identity['conversion_contract']['refine_flow'] != 'A'
+                or identity['assets'] != job['assets']
+                or quality['model_sha256'] != job['assets'][MODEL_XML]
                 or run['fingerprint'] != identity['fingerprint']):
             return None
         files = ['quality.json', 'motion.npz', 'motion.pkl']
@@ -95,7 +102,8 @@ def prepare(args, content):
     jobs = []
     for row in rows:
         job = {key: row[key] for key in ('input', 'input_sha256', 'source')}
-        job.update(key=row['id'], options=options, ground_running=row.get('ground_running', False))
+        job.update(key=row['id'], options=options, ground_running=row.get('ground_running', False),
+                   audit_workers=args.audit_workers)
         if job['source'] == 'auto' and Path(job['input']).suffix.lower() in ('.pt', '.pkl', '.npz'):
             job['source'] = 'smplx'
         if job['source']=='smplx':
@@ -128,9 +136,12 @@ def worker(connection, job, folder, cpu):
     from .resources import process_memory, release_memory
     from .resource_events import set_gate, phase
     last_trim, last_phase = 0., None
+    workspace_active = False
 
     def gate(event):
         nonlocal last_trim,last_phase
+        if workspace_active:
+            raise RuntimeError('Return the operator workspace before entering a gated phase')
         stage = event['phase']
         now = time.monotonic()
         if stage != last_phase or now-last_trim >= 15:
@@ -146,7 +157,23 @@ def worker(connection, job, folder, cpu):
         if connection.recv() != 'grant':
             raise InterruptedError('Shared pool worker yielded at a safe boundary')
 
+    def workspace_gate(cores=None, workspace_bytes=0):
+        nonlocal workspace_active
+        if cores is None:
+            release_memory()
+            connection.send(dict(workspace_returned=True))
+            workspace_active = False
+            return ()
+        if workspace_active:
+            return ()
+        connection.send(dict(workspace_request=dict(cores=cores, workspace_bytes=workspace_bytes,
+                             cgroup_headroom=resources.memory()['cgroup_headroom'])))
+        cpus = connection.recv()
+        workspace_active = bool(cpus)
+        return cpus
+
     set_gate(gate)
+    set_workspace_gate(workspace_gate if job['audit_workers'] == 2 else None)
     with (folder.parent/'worker.log').open('w', buffering=1) as log:
         import contextlib
         with contextlib.redirect_stdout(log), contextlib.redirect_stderr(log):
@@ -154,6 +181,17 @@ def worker(connection, job, folder, cpu):
                 if sha(Path(job['input'])) != job['input_sha256']:
                     raise ValueError('Input changed after manifest verification')
                 phase('loading')
+                from .model_cache import enable_audit_models, prepare_audit_models
+                from .v8.audit import set_geometry_timing_path
+                models = job['models']
+                if models is None:
+                    cache_started = time.perf_counter()
+                    models = prepare_audit_models(job['assets'], resources.state_root()/'model_cache')
+                    connection.send(dict(model_cache=dict(preflight_s=time.perf_counter()-cache_started, models=models)))
+                model_started = time.perf_counter()
+                enable_audit_models(models)
+                write(folder.parent/'model_load.json', dict(base_mjb_s=time.perf_counter()-model_started))
+                set_geometry_timing_path(folder.parent/'geometry_timings.jsonl')
                 if job['source'] == 'smplx' and not job.get('checkpoint'):
                     # The existing adapter allocates its CPU model in a child.
                     phase('preprocessing')
@@ -165,18 +203,38 @@ def worker(connection, job, folder, cpu):
     connection.close()
 
 
-def tree_pss(pid):
-    from .resources import process_memory
-    total = 0
+def tree_pids(pid):
     pending = [pid]
     while pending:
         current = pending.pop()
-        total += process_memory(current)
+        yield current
         try:
             pending.extend(map(int,Path(f'/proc/{current}/task/{current}/children').read_text().split()))
         except OSError:
             pass
-    return total
+
+
+def tree_pss(pid):
+    if sys.platform == 'darwin':
+        # macOS reports RSS, so count the helper and worker from one snapshot.
+        try:
+            rows = subprocess.check_output(['ps', '-ax', '-o', 'pid=,ppid=,rss='], text=True)
+        except (OSError, subprocess.SubprocessError):
+            return resources.process_memory(pid)
+        children = {}
+        resident = {}
+        for row in rows.splitlines():
+            child, parent, rss = map(int, row.split())
+            children.setdefault(parent, []).append(child)
+            resident[child] = rss * 1024
+        pending = [pid]
+        total = 0
+        while pending:
+            current = pending.pop()
+            total += resident.get(current, 0)
+            pending.extend(children.get(current, ()))
+        return total
+    return sum(resources.process_memory(current) for current in tree_pids(pid))
 
 
 def pressure_high():
@@ -209,18 +267,52 @@ def close(worker):
         process.join(2)
     if process.is_alive():
         raise RuntimeError(f'Worker process did not exit: {process.pid}')
+    if worker['lease'].borrowed_cpus:
+        # A crashed worker may leave helpers in its process group.
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
     worker['pipe'].close()
     process.close()
 
 
+def grant_request(worker, added, exclusive):
+    """Release deadlock recovery priority when its pending grant is delivered."""
+    try:
+        worker['pipe'].send('grant')
+    except (BrokenPipeError, EOFError, OSError):
+        return False, exclusive
+    worker['lease'].grant += added
+    worker['request'] = None
+    if exclusive == worker['job']['key']:
+        exclusive = None
+    return True, exclusive
+
+
+def reply_workspace(worker, cpus):
+    request = worker['workspace_request']
+    try:
+        worker['pipe'].send(cpus)
+    except (BrokenPipeError, EOFError, OSError):
+        return False
+    worker['workspace_request'] = None
+    if cpus:
+        worker['lease'].borrow(cpus, request['workspace_bytes'])
+    return True
+
+
 def run(args):
+    from .paths import asset_fingerprints
+
     root = args.output.resolve()
     with resources.batch_lock():
         content = args.manifest.read_bytes()
         jobs, options = prepare(args, content)
         snapshot = resources.memory()
-        if snapshot['total'] < START+BASE:
-            raise ValueError('Host memory cannot supply a worker and the 12 GiB startup reserve')
+        watermarks = tuple(round(value * GIB) for value in args.memory_watermarks)
+        if snapshot['total'] < watermarks[2]+BASE:
+            raise ValueError('Host memory cannot supply a worker and the configured startup reserve')
         limit = snapshot.get('cgroup_limit')
         if limit is not None and limit < BASE+GIB:
             raise ValueError('Cgroup limit cannot supply a worker and the 1 GiB startup reserve')
@@ -231,12 +323,18 @@ def run(args):
         else:
             root.mkdir(parents=True, exist_ok=False)
             write(root/'pool_batch.json', spec)
-        return schedule(jobs, root, args.ramp, resources.workers(args.workers), snapshot)
+        assets = asset_fingerprints()
+        for job in jobs:
+            job['assets'] = assets
+        snapshot = resources.memory()
+        return schedule(jobs, root, args.ramp, resources.workers(args.workers), snapshot, watermarks)
 
 
-def schedule(jobs, root, ramp, workers, initial_memory):
+def schedule(jobs, root, ramp, workers, initial_memory, watermarks=(DANGER, RECOVER, START)):
     ctx = mp.get_context('spawn')
-    cpus = resources.cpu_order()[:workers]
+    cpu_groups = resources.cpu_groups()
+    pool = JointPool(cpu_groups, watermarks)
+    cpu_admission = CpuAdmission((cpu for core in cpu_groups for cpu in core), resources.cpu_count())
     completed = {}
     active = {}
     pending = deque()
@@ -245,6 +343,7 @@ def schedule(jobs, root, ramp, workers, initial_memory):
     oom_count = initial_memory.get('cgroup_oom_kills',0)
     stopped = False
     state = 'failed'
+    models = None
 
     def stop(*_):
         nonlocal stopped
@@ -259,12 +358,18 @@ def schedule(jobs, root, ramp, workers, initial_memory):
         unused = sum(w['lease'].unused for w in active.values())
         write(root/'status.json',dict(state=state,updated_at=time.time(),pending=[j['key'] for j in pending],
               running={key:dict(pid=w['process'].pid,phase=w['phase'],loan_bytes=max(0,w['lease'].grant-BASE),
+                                cpu=w['lease'].cpu, borrowed_cpus=w['lease'].borrowed_cpus,
                                 resident_bytes=w['lease'].resident, max_resident_bytes=w['max_resident'],
                                 waiting=w['request'] is not None,folder=str(w['folder']),
                                 checkpoint=w['job'].get('checkpoint')) for key,w in active.items()},
               complete=completed,counts=dict(Counter(v['status'] for v in completed.values())),
               memory=snapshot,pool=dict(base_bytes=BASE,unused_bytes=unused,frozen=pool.frozen,
-                                        host_remaining_bytes=snapshot['available']-unused),
+                                        exclusive_worker=exclusive,
+                                        watermarks_gib=dict(danger=pool.danger/GIB, recover=pool.recover/GIB,
+                                                            startup=pool.start/GIB),
+                                        host_remaining_bytes=snapshot['available']-unused,
+                                        cgroup_remaining_bytes=snapshot['cgroup_headroom']-unused),
+              cpu=dict(cpu_admission.report(), max_workers=workers),
               counters=dict(events),max_running=max_active,minimum_host_available_bytes=min_available))
 
     for job in jobs:
@@ -282,7 +387,6 @@ def schedule(jobs, root, ramp, workers, initial_memory):
                 break
             event('checkpoint_rejected', key=job['key'], folder=str(a/'frax'), reason=reason)
         pending.append(job)
-    pool = Pool()
     compiler_owner = None
     grant_frozen = False
     last_pressure_sample = 0.
@@ -314,6 +418,20 @@ def schedule(jobs, root, ramp, workers, initial_memory):
                         if returned:
                             event('return_unused',key=key,phase=w['phase'],bytes=returned)
                         w['wait_started'] = now
+                    elif 'model_cache' in msg:
+                        models = msg['model_cache']['models']
+                        write(root/'model_cache.json', msg['model_cache'])
+                        event('model_cache_ready', key=key)
+                    elif 'workspace_request' in msg:
+                        w['workspace_request'] = msg['workspace_request']
+                    elif 'workspace_returned' in msg:
+                        lease = w['lease']
+                        if lease.borrowed_cpus:
+                            lease.resident = tree_pss(w['process'].pid)
+                            cpus = lease.borrowed_cpus
+                            returned = lease.return_workspace()
+                            event('workspace_return', key=key, cpus=cpus, unused_bytes=returned,
+                                  resident_bytes=lease.resident)
                     else:
                         result = msg
                         break
@@ -345,13 +463,15 @@ def schedule(jobs, root, ramp, workers, initial_memory):
                         error = (result or {}).get('error') or f'Worker exited with code {code}'
                         q = dict(status='failed',folder=str(w['folder']),error=error)
                     completed[key] = dict(q, resumed_from=w['job'].get('checkpoint'))
-                    event('worker_exit',key=key,status=q['status'],base_bytes=BASE,loan_bytes=loan)
+                    event('worker_exit',key=key,status=q['status'],base_bytes=BASE,loan_bytes=loan,
+                          cpu=w['lease'].cpu, borrowed_cpus=w['lease'].borrowed_cpus)
                 else:
                     live = tree_pss(w['process'].pid)
                     w['lease'].resident = max(live, (w['request'] or {}).get('pss_bytes', 0))
                     w['max_resident'] = max(w['max_resident'],w['lease'].resident)
 
             snapshot = resources.memory()
+            cpu_limit = cpu_admission.sample(pid for w in active.values() for pid in tree_pids(w['process'].pid))
             min_available = min(min_available,snapshot['available'])
             leases = [w['lease'] for w in active.values()]
             host,group = pool.remaining(snapshot,leases)
@@ -373,19 +493,16 @@ def schedule(jobs, root, ramp, workers, initial_memory):
                 required = requested_total(request,w['job']['frames'])
                 added = max(0,required-lease.grant)
                 amount = max(0,required-max(lease.grant,lease.resident))
-                if added and not pool.allows(snapshot,leases,amount):
+                if amount and not pool.allows(snapshot,leases,amount):
                     continue
-                lease.grant += added
+                was_exclusive = exclusive == key
+                granted, exclusive = grant_request(w, added, exclusive)
+                if not granted:
+                    continue
                 if compiling:
                     compiler_owner = key
-                try:
-                    w['pipe'].send('grant')
-                except (BrokenPipeError, EOFError, OSError):
-                    lease.grant -= added
-                    if compiling:
-                        compiler_owner = None
-                    continue
-                w['request'] = None
+                if was_exclusive:
+                    event('exclusive_released',key=key,phase=w['phase'])
                 if amount:
                     after, _ = pool.remaining(snapshot,leases)
                     event('grant',key=key,phase=w['phase'],bytes=amount,after_host_bytes=after)
@@ -413,23 +530,43 @@ def schedule(jobs, root, ramp, workers, initial_memory):
             else:
                 all_wait_since=None
 
-            can_start = pending and not exclusive and not blocked and len(active)<len(cpus) and now>=next_start
-            if can_start and pool.allows(snapshot,leases,BASE,start=True):
-                job=pending.popleft()
+            cache_pending = models is None and active
+            can_start = (pending and not exclusive and not blocked and not cache_pending
+                         and len(active)<workers and now>=next_start)
+            cpu = pool.startup_cpu(snapshot,leases,cpu_limit) if can_start else None
+            if cpu is not None:
+                job=pending[0]
                 key=job['key']
-                used={w['cpu'] for w in active.values()}
-                cpu=next(c for c in cpus if c not in used)
                 folder=root/key/f'attempt_{time.time_ns()}'/'frax'
                 folder.parent.mkdir(parents=True)
                 connection,endpoint=ctx.Pipe()
-                process=ctx.Process(target=worker,args=(endpoint,job,folder,cpu))
-                process.start()
-                endpoint.close()
-                active[key]=dict(job=job,folder=folder,process=process,pipe=connection,cpu=cpu,
-                                 phase='starting',lease=Lease(),request=None,max_resident=0)
+                process=ctx.Process(target=worker,args=(endpoint,dict(job,models=models),folder,cpu))
+                try:
+                    process.start()
+                except BaseException:
+                    connection.close()
+                    raise
+                finally:
+                    endpoint.close()
+                pending.popleft()
+                lease = Lease(cpu=cpu)
+                active[key]=dict(job=job,folder=folder,process=process,pipe=connection,
+                                 phase='starting',lease=lease,request=None,max_resident=0,
+                                 workspace_request=None)
+                leases.append(lease)
                 max_active=max(max_active,len(active))
                 next_start=now+ramp
-                event('worker_start',key=key,base_bytes=BASE,pid=process.pid,checkpoint=job.get('checkpoint'))
+                event('worker_start',key=key,cpu=cpu,base_bytes=BASE,pid=process.pid,checkpoint=job.get('checkpoint'))
+
+            for key, w in active.items():
+                request = w['workspace_request']
+                if request is None:
+                    continue
+                cpus = () if pending or blocked or exclusive else pool.workspace_cpus(
+                    snapshot, leases, cpu_limit, w['lease'], **request)
+                if reply_workspace(w, cpus):
+                    event('workspace_grant' if cpus else 'workspace_serial', key=key, cpus=cpus,
+                          bytes=request['workspace_bytes'] if cpus else 0)
 
             if now-previous_write>=2:
                 status('running',snapshot)
@@ -456,11 +593,15 @@ def main():
     from .contract import DEFAULT_FOOT_CONTACT
     from .smplx_cli import add_options
 
-    parser = argparse.ArgumentParser(description='Run Refine A batches with the V3 shared memory pool')
+    parser = argparse.ArgumentParser(description='Run Refine A batches with a shared CPU and memory pool')
     parser.add_argument('manifest', type=Path)
     parser.add_argument('output', type=Path)
     parser.add_argument('--workers', default='auto', help='Maximum workers; memory admission may use fewer')
     parser.add_argument('--ramp', type=float, default=2., help='Minimum seconds between new workers')
+    parser.add_argument('--audit-workers', type=int, choices=(1, 2), default=1,
+                        help='Use one CPU or request a second CPU for full-trajectory geometry audits')
+    parser.add_argument('--memory-watermarks', type=float, nargs=3, metavar=('DANGER', 'RECOVER', 'START'),
+                        default=(DANGER/GIB, RECOVER/GIB, START/GIB), help='Host memory reserves in GiB (default: 8 10 12)')
     parser.add_argument('--resume', action='store_true', help='Verify previous exports and resume from available checkpoints')
     parser.add_argument('--bvh-units', choices=['cm','m','mm'], default='cm')
     parser.add_argument('--bvh-translations', choices=['absolute','offset'], default='absolute')
@@ -474,6 +615,9 @@ def main():
     args.manifest = args.manifest.resolve()
     if not math.isfinite(args.ramp) or args.ramp<=0 or min(args.iterations,args.initial_iterations)<1:
         parser.error('Worker start interval and iteration counts must be positive')
+    danger, recover, start = args.memory_watermarks
+    if not 0 < danger < recover < start < math.inf:
+        parser.error('Memory watermarks must be finite, positive and strictly increasing')
     if args.input_fps is not None and (not math.isfinite(args.input_fps) or args.input_fps <= 0):
         parser.error('SMPL-X input fps must be finite and positive')
     try:

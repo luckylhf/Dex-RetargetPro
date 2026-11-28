@@ -47,6 +47,15 @@ def augmented(robot):
     if key in _CACHE:
         _CACHE.move_to_end(key);_,model,record=_CACHE[key]
         return model,copy.deepcopy(record)
+    from .model_cache import load_full_collision
+    cached = load_full_collision(robot)
+    model, record = build_augmented(robot) if cached is None else cached
+    _CACHE[key]=(robot.m,model,record)
+    while len(_CACHE)>1:_CACHE.popitem(last=False)
+    return model,copy.deepcopy(record)
+
+
+def build_augmented(robot):
     from .model_cache import model_spec
     saved=robot.d.qpos.copy();spec=model_spec(robot.path);record={'policy':POLICY,'sides':{}}
     try:
@@ -96,9 +105,7 @@ def augmented(robot):
     extra += [model.geom(name).id for v in record['sides'].values() for name in v['external_parts']+[v['shaft_geom']]]
     ids=np.unique(np.r_[ids,extra])
     model.geom_contype[ids]=1;model.geom_conaffinity[ids]=1
-    _CACHE[key]=(robot.m,model,record)
-    while len(_CACHE)>1:_CACHE.popitem(last=False)
-    return model,copy.deepcopy(record)
+    return model,record
 
 
 def groups(model,record,ids):

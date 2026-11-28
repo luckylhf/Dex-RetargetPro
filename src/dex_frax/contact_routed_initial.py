@@ -163,6 +163,40 @@ class SectionJoins:
             raise ValueError(reason)
         return candidate, dict(window=[start, end], iterations=detail['iterations'])
 
+    def recover_section(self, rows, required, section, blocked, joins):
+        """Try removing optional padding before dropping a rejected landing section."""
+        lo, hi = section
+        core = np.flatnonzero(required[lo:hi]) + lo
+        start, end = lo, hi
+        moved = []
+        for failure in blocked:
+            cut, entering = failure['frame'], failure['entering']
+            alternatives = (range(cut + 1, int(core[0]) + 1) if entering
+                            else range(cut - 1, int(core[-1]), -1))
+            alternate = next((i for i in alternatives if self.check_direct(i, entering) is None), None)
+            if alternate is None:
+                return None, dict(reason='no_checked_cut_in_padding')
+            if entering:
+                start = alternate
+            else:
+                end = alternate
+            moved.append(dict(frame=cut,new_frame=alternate))
+
+        candidate = rows.copy()
+        candidate[lo:start] = self.legacy[lo:start]
+        candidate[end:hi] = self.legacy[end:hi]
+        for cut, old in ((start,lo),(end,hi)):
+            if cut in (0,len(rows)):
+                continue
+            # A fit at the other end may overlap the trimmed rows. Check the
+            # assembled trajectory, including the entire good fit if present.
+            window = joins.get(old, {}).get('window') if cut==old else None
+            a,b = window or (cut-1,cut+1)
+            reason = self.check(candidate,a,b)
+            if reason:
+                return None,dict(reason=reason,frame=cut)
+        return candidate,dict(remaining_section=[start,end],moved_joins=moved)
+
     def assemble(self, required, padding):
         if padding < 1:
             raise ValueError('positive join padding required')
@@ -178,8 +212,10 @@ class SectionJoins:
             rows = choose_rows(self.legacy, self.landing, active)
             grow = []
             joins = []
-            blocked_joins = []
+            blocked_sections = []
             for lo, hi in sections:
+                blocked = []
+                checked = {}
                 for cut, entering in ((lo, True), (hi, False)):
                     if cut in (0, len(rows)):
                         continue
@@ -202,18 +238,33 @@ class SectionJoins:
                             rows, fit = self.fit(rows, cut, entering, (lo, hi), padding)
                         except (ValueError, RuntimeError, OSQPException) as error:
                             if edge == cut:
-                                blocked_joins.append((cut, reason, str(error)))
+                                blocked.append(dict(frame=cut,entering=entering,reason=reason,fit_reason=str(error)))
                             else:
                                 grow.append((min(cut, edge), max(cut, edge)))
                                 joins.append(dict(frame=cut, status='expand', original_reason=reason, reason=str(error)))
                         else:
+                            checked[cut] = fit
                             joins.append(dict(frame=cut, status='solved', **fit))
+                if blocked:
+                    blocked_sections.append(((lo,hi),blocked,checked))
             attempts.append(dict(sections=sections, joins=joins))
+            if blocked_sections:
+                attempts[-1]['blocked_sections'] = [
+                    dict(section=list(section),joins=failures) for section,failures,_ in blocked_sections]
             if not grow:
-                if blocked_joins:
-                    cut, reason, detail = blocked_joins[0]
-                    raise ValueError(f'Cannot validate landing join at frame {cut} without changing source flight: '
-                                     f'{reason}; {detail}')
+                for (lo,hi), failures, checked in blocked_sections:
+                    candidate, detail = self.recover_section(rows,required,(lo,hi),failures,checked)
+                    if candidate is None:
+                        rows[lo:hi] = self.legacy[lo:hi]
+                        active[lo:hi] = False
+                        status = 'kept_contact_first'
+                    else:
+                        rows = candidate
+                        start,end = detail['remaining_section']
+                        active[lo:start] = False
+                        active[end:hi] = False
+                        status = 'moved_inward'
+                    joins.append(dict(section=[lo,hi],status=status,**detail))
                 return rows, active, attempts
             for lo, hi in grow:
                 active[lo:hi] = True
@@ -275,14 +326,17 @@ class ContactRoutedInitial(FullClipInitial):
             self.save_stage('contact_routed', rows, robot, targets,
                             time.monotonic() - started, {'attempts': len(attempts)})
 
-        assert np.all(active[required]) and np.array_equal(rows[~active], legacy[~active])
+        assert np.array_equal(rows[~active], legacy[~active])
+        unapplied = required & ~active
         self.initial = rows.copy()
-        final_stage = 'contact_routed' if required.any() else 'contact_first'
+        final_stage = 'contact_routed' if active.any() else 'contact_first'
         self.ledger.update(status='completed', final_stage=final_stage,
                            applied_103_frames=np.flatnonzero(active).tolist(),
+                           unapplied_103_frames=np.flatnonzero(unapplied).tolist(),
                            applied_sections=[(int(a), int(b)) for a, b in runs(active)],
                            initial_wall_s=time.monotonic() - started)
         self.report['full_chain'] = dict(report_file='motion.full_chain.json', selected=final_stage,
-                                         routed_ground_frames=int(active.sum()))
+                                         routed_ground_frames=int(active.sum()),
+                                         unapplied_landing_required_frames=int(unapplied.sum()))
         atomic_json(self.artifact('full_chain.json'), self.ledger)
         return rows, records
